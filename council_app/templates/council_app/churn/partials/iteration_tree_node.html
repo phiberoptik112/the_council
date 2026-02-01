@@ -1,0 +1,57 @@
+{% comment %}
+Recursive template for rendering iteration tree nodes
+Expected context:
+  - node: dict with 'iteration' and 'children' keys
+  - depth: current depth level (for indentation)
+{% endcomment %}
+
+{% with iteration=node.iteration %}
+<div class="{% if depth > 0 %}ml-6 border-l-2 border-gray-200 pl-4{% endif %}">
+    <a href="{% url 'council_app:churn_iteration' pk=iteration.id %}" 
+       class="block p-3 rounded-lg border {% if iteration.status == 'complete' %}border-gray-200 hover:border-purple-300{% elif iteration.status == 'processing' %}border-yellow-300 bg-yellow-50{% elif iteration.status == 'error' %}border-red-300 bg-red-50{% else %}border-gray-300{% endif %} transition-colors">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <!-- Status indicator -->
+                <span class="flex-shrink-0 w-3 h-3 rounded-full
+                    {% if iteration.status == 'complete' %}bg-green-500
+                    {% elif iteration.status == 'processing' %}bg-yellow-500 animate-pulse
+                    {% elif iteration.status == 'error' %}bg-red-500
+                    {% else %}bg-gray-400{% endif %}"></span>
+                
+                <div>
+                    <span class="font-medium text-gray-900">
+                        {% if iteration.branch_name %}
+                        {{ iteration.branch_name }}
+                        {% else %}
+                        Iteration {{ iteration.iteration_number }}
+                        {% endif %}
+                    </span>
+                    {% if iteration.is_root %}
+                    <span class="ml-2 text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">Original</span>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="flex items-center space-x-2 text-sm text-gray-500">
+                <span class="px-2 py-0.5 bg-gray-100 rounded text-xs">{{ iteration.get_churn_type_display }}</span>
+                <span>{{ iteration.created_at|date:"M j" }}</span>
+            </div>
+        </div>
+        
+        {% if iteration.status == 'processing' %}
+        <div class="mt-2 text-xs text-yellow-700">Processing...</div>
+        {% elif iteration.status == 'error' %}
+        <div class="mt-2 text-xs text-red-700">{{ iteration.error_message|truncatewords:10 }}</div>
+        {% endif %}
+    </a>
+    
+    <!-- Children -->
+    {% if node.children %}
+    <div class="mt-2 space-y-2">
+        {% for child in node.children %}
+        {% include 'council_app/churn/partials/iteration_tree_node.html' with node=child depth=depth|add:1 %}
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endwith %}

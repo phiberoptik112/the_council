@@ -1,0 +1,59 @@
+{% comment %}
+HTMX partial for iteration status polling
+{% endcomment %}
+
+<div id="iteration-status" 
+     {% if iteration.status == 'pending' or iteration.status == 'processing' %}
+     hx-get="{% url 'council_app:iteration_status' pk=iteration.id %}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     {% endif %}>
+    
+    {% if iteration.status == 'pending' %}
+    <div class="flex items-center space-x-3 p-4 bg-gray-50 rounded-lg">
+        <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-purple-600"></div>
+        <div>
+            <p class="font-medium text-gray-900">Pending...</p>
+            <p class="text-sm text-gray-500">Waiting for processing to start</p>
+        </div>
+    </div>
+    
+    {% elif iteration.status == 'processing' %}
+    <div class="flex items-center space-x-3 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+        <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-600"></div>
+        <div>
+            <p class="font-medium text-yellow-800">Processing...</p>
+            <p class="text-sm text-yellow-600">The council is reviewing your writing</p>
+        </div>
+    </div>
+    
+    {% elif iteration.status == 'complete' %}
+    <div class="flex items-center space-x-3 p-4 bg-green-50 rounded-lg border border-green-200">
+        <svg class="h-6 w-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+        </svg>
+        <div>
+            <p class="font-medium text-green-800">Complete</p>
+            <p class="text-sm text-green-600">Feedback is ready to review</p>
+        </div>
+    </div>
+    
+    {% elif iteration.status == 'error' %}
+    <div class="p-4 bg-red-50 rounded-lg border border-red-200">
+        <div class="flex items-center space-x-3">
+            <svg class="h-6 w-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <div>
+                <p class="font-medium text-red-800">Error</p>
+                <p class="text-sm text-red-600">{{ iteration.error_message }}</p>
+            </div>
+        </div>
+    </div>
+    
+    {% else %}
+    <div class="flex items-center space-x-3 p-4 bg-gray-50 rounded-lg">
+        <span class="text-gray-600">{{ iteration.get_status_display }}</span>
+    </div>
+    {% endif %}
+</div>

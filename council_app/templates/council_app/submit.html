@@ -1,0 +1,160 @@
+{% extends "council_app/base.html" %}
+
+{% block title %}Submit Query{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto">
+    <!-- Header -->
+    <div class="text-center mb-8">
+        <h1 class="text-3xl font-bold text-gray-900 mb-2">Ask The Council</h1>
+        <p class="text-gray-600">Submit a question and let multiple AI models vote on the best answer</p>
+    </div>
+    
+    <!-- Query Form -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <form method="post" action="{% url 'council_app:submit' %}" id="query-form">
+            {% csrf_token %}
+            
+            <!-- Prompt Input -->
+            <div class="mb-6">
+                <label for="id_prompt" class="block text-sm font-medium text-gray-700 mb-2">
+                    Your Question
+                </label>
+                <textarea 
+                    name="prompt" 
+                    id="id_prompt"
+                    rows="4"
+                    required
+                    minlength="10"
+                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-council-500 focus:border-transparent resize-none text-gray-900"
+                    placeholder="Enter your question or prompt...">{{ form.prompt.value|default:"" }}</textarea>
+                {% if form.prompt.errors %}
+                <p class="mt-1 text-sm text-red-600">{{ form.prompt.errors.0 }}</p>
+                {% endif %}
+            </div>
+            
+            <!-- Model Selection -->
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                    Select Council Members
+                    <span class="text-gray-400 font-normal">(minimum 2)</span>
+                </label>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {% for model in models %}
+                    <label class="flex items-center p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors {% if model.id in selected_models %}bg-council-50 border-council-500{% endif %}">
+                        <input 
+                            type="checkbox" 
+                            name="models" 
+                            value="{{ model.id }}"
+                            {% if model.id in selected_models or forloop.counter <= 3 %}checked{% endif %}
+                            class="w-4 h-4 text-council-600 border-gray-300 rounded focus:ring-council-500">
+                        <div class="ml-3">
+                            <span class="text-sm font-medium text-gray-900">{{ model.display_name|default:model.name }}</span>
+                            {% if model.win_rate > 0 %}
+                            <span class="block text-xs text-gray-500">{{ model.win_rate }}% win rate</span>
+                            {% endif %}
+                        </div>
+                    </label>
+                    {% empty %}
+                    <div class="col-span-3 text-center py-4 text-gray-500">
+                        No models configured. <a href="{% url 'council_app:models' %}" class="text-council-600 hover:underline">Add models</a> first.
+                    </div>
+                    {% endfor %}
+                </div>
+                {% if form.models.errors %}
+                <p class="mt-1 text-sm text-red-600">{{ form.models.errors.0 }}</p>
+                {% endif %}
+            </div>
+            
+            <!-- Council Mode -->
+            <div class="mb-6">
+                <label for="id_council_mode" class="block text-sm font-medium text-gray-700 mb-2">
+                    Voting Mode
+                </label>
+                <select 
+                    name="council_mode" 
+                    id="id_council_mode"
+                    class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-council-500 focus:border-transparent">
+                    <option value="ranked" selected>Ranked Voting (Borda Count)</option>
+                    <option value="majority">Majority Vote</option>
+                    <option value="synthesis">Synthesis (Combine Best Elements)</option>
+                    <option value="debate">Debate (Critique &amp; Refine)</option>
+                </select>
+                <p class="mt-1 text-xs text-gray-500">
+                    <span id="mode-description">Each model ranks responses; points are awarded based on position.</span>
+                </p>
+            </div>
+            
+            <!-- Submit Button -->
+            <div class="flex justify-end">
+                <button 
+                    type="submit"
+                    class="px-6 py-3 bg-council-600 text-white font-medium rounded-lg hover:bg-council-700 focus:outline-none focus:ring-2 focus:ring-council-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    id="submit-btn">
+                    <span class="flex items-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                        </svg>
+                        Convene The Council
+                    </span>
+                </button>
+            </div>
+        </form>
+    </div>
+    
+    <!-- Recent Queries -->
+    {% if recent_queries %}
+    <div class="mt-8">
+        <h2 class="text-lg font-semibold text-gray-900 mb-4">Recent Queries</h2>
+        <div class="space-y-3">
+            {% for query in recent_queries %}
+            <a href="{% url 'council_app:results' query.id %}" 
+               class="block bg-white rounded-lg border border-gray-200 p-4 hover:border-council-300 transition-colors">
+                <div class="flex justify-between items-start">
+                    <p class="text-gray-900 line-clamp-2">{{ query.prompt|truncatewords:20 }}</p>
+                    <span class="ml-4 flex-shrink-0 px-2 py-1 text-xs rounded-full
+                        {% if query.status == 'complete' %}bg-green-100 text-green-700
+                        {% elif query.status == 'error' %}bg-red-100 text-red-700
+                        {% else %}bg-yellow-100 text-yellow-700{% endif %}">
+                        {{ query.get_status_display }}
+                    </span>
+                </div>
+                <p class="mt-1 text-sm text-gray-500">{{ query.created_at|timesince }} ago</p>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+    // Update mode description based on selection
+    const modeSelect = document.getElementById('id_council_mode');
+    const modeDesc = document.getElementById('mode-description');
+    const descriptions = {
+        'ranked': 'Each model ranks responses; points are awarded based on position.',
+        'majority': 'Simple majority vote - each model picks their favorite.',
+        'synthesis': 'A new response is generated combining the best elements from all.',
+        'debate': 'The winning response is critiqued and refined by another model.'
+    };
+    
+    modeSelect.addEventListener('change', function() {
+        modeDesc.textContent = descriptions[this.value] || '';
+    });
+    
+    // Form submission feedback
+    document.getElementById('query-form').addEventListener('submit', function() {
+        const btn = document.getElementById('submit-btn');
+        btn.disabled = true;
+        btn.innerHTML = `
+            <span class="flex items-center">
+                <svg class="animate-spin w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Convening Council...
+            </span>
+        `;
+    });
+</script>
+{% endblock %}

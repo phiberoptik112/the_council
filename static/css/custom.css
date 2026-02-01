@@ -1,0 +1,45 @@
+/* Custom styles for The Council */
+/* Most styling is handled by Tailwind CSS via CDN */
+
+/* Additional animations */
+@keyframes pulse-slow {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.7;
+    }
+}
+
+.animate-pulse-slow {
+    animation: pulse-slow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Response card transitions */
+.response-card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* HTMX loading states */
+.htmx-request .loading-indicator {
+    display: block;
+}
+
+.loading-indicator {
+    display: none;
+}
+
+/* Code/response text formatting */
+.response-text {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Markdown-like code blocks in responses */
+.response-code {
+    background-color: #f3f4f6;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+}

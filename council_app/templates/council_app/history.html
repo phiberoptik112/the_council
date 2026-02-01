@@ -1,0 +1,140 @@
+{% extends "council_app/base.html" %}
+
+{% block title %}Query History{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Query History</h1>
+            <p class="text-gray-600">Browse past council decisions</p>
+        </div>
+        <a href="{% url 'council_app:submit' %}" 
+           class="px-4 py-2 bg-council-600 text-white rounded-lg hover:bg-council-700 transition-colors text-sm font-medium">
+            New Query
+        </a>
+    </div>
+    
+    <!-- Search and Filter -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+        <form method="get" class="flex flex-col sm:flex-row gap-4">
+            <div class="flex-1">
+                <input 
+                    type="text" 
+                    name="search" 
+                    value="{{ search_query|default:'' }}"
+                    placeholder="Search queries..."
+                    class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-council-500 focus:border-transparent">
+            </div>
+            <div class="flex gap-2">
+                <select name="status" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-council-500">
+                    <option value="">All Status</option>
+                    <option value="complete" {% if status_filter == 'complete' %}selected{% endif %}>Complete</option>
+                    <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Pending</option>
+                    <option value="error" {% if status_filter == 'error' %}selected{% endif %}>Error</option>
+                </select>
+                <button type="submit" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors">
+                    Filter
+                </button>
+            </div>
+        </form>
+    </div>
+    
+    <!-- Query List -->
+    {% if queries %}
+    <div class="space-y-4">
+        {% for query in queries %}
+        <a href="{% url 'council_app:results' query.id %}" 
+           class="block bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:border-council-300 hover:shadow-md transition-all">
+            <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-2">
+                        <span class="text-xs font-medium px-2 py-1 rounded-full
+                            {% if query.status == 'complete' %}bg-green-100 text-green-700
+                            {% elif query.status == 'error' %}bg-red-100 text-red-700
+                            {% elif query.status == 'voting' %}bg-blue-100 text-blue-700
+                            {% else %}bg-yellow-100 text-yellow-700{% endif %}">
+                            {{ query.get_status_display }}
+                        </span>
+                        <span class="text-xs text-gray-500">{{ query.get_council_mode_display }}</span>
+                    </div>
+                    <p class="text-gray-900 font-medium line-clamp-2 mb-2">{{ query.prompt }}</p>
+                    
+                    {% if query.winner %}
+                    <div class="flex items-center text-sm text-gray-600">
+                        <svg class="w-4 h-4 mr-1 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                        </svg>
+                        Winner: {{ query.winner.model.display_name|default:query.winner.model.name }}
+                    </div>
+                    {% endif %}
+                </div>
+                
+                <div class="ml-4 text-right text-sm text-gray-500 flex-shrink-0">
+                    <p>{{ query.created_at|date:"M d, Y" }}</p>
+                    <p class="text-xs">{{ query.created_at|time:"H:i" }}</p>
+                    {% if query.duration %}
+                    <p class="text-xs mt-1">{{ query.duration|floatformat:1 }}s</p>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Response Summary -->
+            {% if query.responses.exists %}
+            <div class="mt-3 pt-3 border-t border-gray-100">
+                <div class="flex items-center text-xs text-gray-500">
+                    <span>{{ query.responses.count }} responses</span>
+                    <span class="mx-2">|</span>
+                    <span>{{ query.votes.count }} votes</span>
+                </div>
+            </div>
+            {% endif %}
+        </a>
+        {% endfor %}
+    </div>
+    
+    <!-- Pagination -->
+    {% if is_paginated %}
+    <div class="mt-8 flex justify-center">
+        <nav class="flex items-center gap-2">
+            {% if page_obj.has_previous %}
+            <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&search={{ search_query }}{% endif %}{% if status_filter %}&status={{ status_filter }}{% endif %}"
+               class="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">
+                Previous
+            </a>
+            {% endif %}
+            
+            <span class="px-4 py-2 text-sm text-gray-600">
+                Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+            </span>
+            
+            {% if page_obj.has_next %}
+            <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&search={{ search_query }}{% endif %}{% if status_filter %}&status={{ status_filter }}{% endif %}"
+               class="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">
+                Next
+            </a>
+            {% endif %}
+        </nav>
+    </div>
+    {% endif %}
+    
+    {% else %}
+    <!-- Empty State -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+        <svg class="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+        </svg>
+        <h3 class="text-lg font-medium text-gray-900 mb-2">No queries yet</h3>
+        <p class="text-gray-500 mb-4">Start by asking the council a question</p>
+        <a href="{% url 'council_app:submit' %}" 
+           class="inline-flex items-center px-4 py-2 bg-council-600 text-white rounded-lg hover:bg-council-700 transition-colors">
+            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+            </svg>
+            New Query
+        </a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

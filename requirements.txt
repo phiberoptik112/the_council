@@ -1,0 +1,17 @@
+# Django and web framework
+Django>=4.2
+django-htmx>=1.17
+django-q2>=1.6
+
+# Async HTTP client
+aiohttp>=3.9
+
+# Database (using SQLite by default, add these for production)
+# psycopg2-binary>=2.9  # PostgreSQL
+# mysqlclient>=2.2      # MySQL
+
+# HTTP client (for legacy sync methods)
+requests>=2.31
+
+# Development
+python-dotenv>=1.0

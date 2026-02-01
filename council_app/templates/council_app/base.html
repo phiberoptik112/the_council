@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}The Council{% endblock %} | Multi-Model LLM Voting</title>
+    
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        council: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <style>
+        /* HTMX loading indicator */
+        .htmx-request .htmx-indicator {
+            display: inline-block;
+        }
+        .htmx-indicator {
+            display: none;
+        }
+        
+        /* Smooth transitions */
+        .fade-in {
+            animation: fadeIn 0.3s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Response card hover effect */
+        .response-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* Winner highlight */
+        .winner-card {
+            border: 2px solid #10b981;
+            background: linear-gradient(to bottom right, #ecfdf5, #d1fae5);
+        }
+    </style>
+    
+    {% block extra_head %}{% endblock %}
+</head>
+<body class="h-full bg-gray-50">
+    <!-- Navigation -->
+    <nav class="bg-white shadow-sm border-b border-gray-200">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <a href="{% url 'council_app:submit' %}" class="flex items-center space-x-2">
+                        <svg class="w-8 h-8 text-council-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                        </svg>
+                        <span class="text-xl font-bold text-gray-900">The Council</span>
+                    </a>
+                </div>
+                
+                <div class="flex items-center space-x-4">
+                    <a href="{% url 'council_app:submit' %}" 
+                       class="{% if request.resolver_match.url_name == 'submit' %}text-council-600 font-medium{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 text-sm">
+                        New Query
+                    </a>
+                    <a href="{% url 'council_app:churn_list' %}" 
+                       class="{% if 'churn' in request.resolver_match.url_name %}text-purple-600 font-medium{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 text-sm">
+                        Churn Machine
+                    </a>
+                    <a href="{% url 'council_app:history' %}" 
+                       class="{% if request.resolver_match.url_name == 'history' %}text-council-600 font-medium{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 text-sm">
+                        History
+                    </a>
+                    <a href="{% url 'council_app:analytics' %}" 
+                       class="{% if request.resolver_match.url_name == 'analytics' %}text-council-600 font-medium{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 text-sm">
+                        Analytics
+                    </a>
+                    <a href="{% url 'council_app:models' %}" 
+                       class="{% if request.resolver_match.url_name == 'models' %}text-council-600 font-medium{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 text-sm">
+                        Models
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+    
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Flash Messages -->
+        {% if messages %}
+        <div class="mb-6 space-y-2">
+            {% for message in messages %}
+            <div class="p-4 rounded-lg {% if message.tags == 'error' %}bg-red-100 text-red-700{% elif message.tags == 'success' %}bg-green-100 text-green-700{% else %}bg-blue-100 text-blue-700{% endif %} fade-in">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        
+        {% block content %}{% endblock %}
+    </main>
+    
+    <!-- Footer -->
+    <footer class="bg-white border-t border-gray-200 mt-auto">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <p class="text-center text-sm text-gray-500">
+                The Council - Multi-Model LLM Voting System | Powered by Ollama
+            </p>
+        </div>
+    </footer>
+    
+    {% block extra_js %}{% endblock %}
+</body>
+</html>
