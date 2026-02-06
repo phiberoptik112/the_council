@@ -13,5 +13,8 @@ aiohttp>=3.9
 # HTTP client (for legacy sync methods)
 requests>=2.31
 
+# System info
+psutil>=5.9
+
 # Development
 python-dotenv>=1.0

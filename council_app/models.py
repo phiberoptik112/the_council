@@ -9,6 +9,11 @@ class ModelConfig(models.Model):
     is_active = models.BooleanField(default=True)
     weight = models.FloatField(default=1.0)  # For weighted voting
     category_weights = models.JSONField(default=dict, blank=True)  # {"coding": 1.5, "creative": 0.8}
+    timeout = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Timeout in seconds (uses global default if blank)"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     
     # Statistics (updated after each query)
@@ -150,6 +155,55 @@ class QueryTag(models.Model):
     
     def __str__(self):
         return self.name
+
+
+class QueryEvent(models.Model):
+    """
+    Tracks granular progress events during query processing.
+    Used for real-time UI feedback and debugging.
+    """
+    
+    class EventType(models.TextChoices):
+        # Query lifecycle
+        QUERY_STARTED = 'started', 'Query Started'
+        
+        # Model response gathering
+        MODEL_QUERYING = 'querying', 'Querying Model'
+        MODEL_SUCCESS = 'success', 'Model Responded'
+        MODEL_ERROR = 'error', 'Model Error'
+        MODEL_TIMEOUT = 'timeout', 'Model Timeout'
+        MODEL_RETRY = 'retry', 'Retrying Model'
+        
+        # Voting phase
+        VOTING_STARTED = 'voting_start', 'Voting Started'
+        MODEL_VOTING = 'voting', 'Model Voting'
+        MODEL_VOTED = 'voted', 'Model Voted'
+        
+        # Completion
+        QUERY_COMPLETE = 'complete', 'Query Complete'
+        QUERY_ERROR = 'query_error', 'Query Error'
+    
+    query = models.ForeignKey(
+        Query,
+        on_delete=models.CASCADE,
+        related_name='events'
+    )
+    event_type = models.CharField(
+        max_length=20,
+        choices=EventType.choices
+    )
+    model_name = models.CharField(max_length=100, blank=True)
+    message = models.TextField(blank=True)
+    raw_data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['created_at']
+    
+    def __str__(self):
+        if self.model_name:
+            return f"{self.get_event_type_display()} - {self.model_name}"
+        return self.get_event_type_display()
 
 
 # =============================================================================

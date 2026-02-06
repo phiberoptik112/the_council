@@ -1,14 +1,17 @@
+import json
+import time
+
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views.generic import ListView, DetailView, TemplateView, CreateView
 from django.views import View
 from django.contrib import messages
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.db.models import Count, Avg, Q
 from django.utils import timezone
 from django.urls import reverse
 
 from .models import (
-    Query, Response, Vote, ModelConfig, QueryTag,
+    Query, Response, Vote, ModelConfig, QueryTag, QueryEvent,
     CreativeProject, ChurnIteration, IterationFeedback
 )
 from .forms import (
@@ -16,6 +19,7 @@ from .forms import (
     CreativeProjectForm, SubmitContentForm, BranchForm,
     BatchChurnForm, TriggerChurnForm
 )
+from .utils import get_system_info
 
 
 class SubmitView(TemplateView):
@@ -27,6 +31,7 @@ class SubmitView(TemplateView):
         context['form'] = QueryForm()
         context['models'] = ModelConfig.objects.filter(is_active=True)
         context['recent_queries'] = Query.objects.all()[:5]
+        context['system_info'] = get_system_info()
         return context
     
     def post(self, request):
@@ -78,13 +83,166 @@ class ResultsView(DetailView):
         context['responses'] = responses
         context['votes'] = query.votes.select_related('voter_model').all()
         
+        # Get events for this query (for error display)
+        context['events'] = QueryEvent.objects.filter(query=query).order_by('created_at')
+        
+        # Build error details from events
+        if query.status == 'error':
+            error_events = QueryEvent.objects.filter(
+                query=query,
+                event_type__in=['error', 'timeout', 'query_error']
+            )
+            model_errors = {}
+            for event in error_events:
+                if event.model_name:
+                    model_errors[event.model_name] = {
+                        'type': event.event_type,
+                        'message': event.message,
+                        'raw_data': event.raw_data
+                    }
+            context['model_errors'] = model_errors
+            
+            # Generate troubleshooting hints based on error types
+            hints = []
+            error_types = set(e.event_type for e in error_events)
+            
+            if 'timeout' in error_types:
+                hints.append("Some models timed out. Consider increasing model timeout in Settings > Models.")
+                hints.append("Smaller models (tinyllama, phi3:mini) respond faster on limited hardware.")
+            
+            if any('404' in str(e.raw_data) or '404' in e.message for e in error_events):
+                hints.append("Model not found in Ollama. Run 'ollama pull <model_name>' to download.")
+            
+            if any('connection' in e.message.lower() for e in error_events):
+                hints.append("Cannot connect to Ollama. Check if it's running with 'systemctl status ollama'.")
+            
+            if not hints:
+                hints.append("Check the event log below for detailed error information.")
+                hints.append("Try with fewer or smaller models.")
+            
+            context['troubleshooting_hints'] = hints
+        
         return context
 
 
 def query_status(request, pk):
     """HTMX endpoint for polling query status"""
     query = get_object_or_404(Query, pk=pk)
-    return render(request, 'council_app/partials/status.html', {'query': query})
+    
+    # Get events for this query
+    events = QueryEvent.objects.filter(query=query).order_by('-created_at')[:20]
+    
+    # Build model status from events
+    model_status = {}
+    for event in reversed(list(events)):
+        if event.model_name:
+            model_status[event.model_name] = {
+                'status': event.event_type,
+                'message': event.message,
+                'raw_data': event.raw_data
+            }
+    
+    return render(request, 'council_app/partials/status.html', {
+        'query': query,
+        'events': events,
+        'model_status': model_status
+    })
+
+
+def query_events_stream(request, pk):
+    """
+    Server-Sent Events endpoint for real-time query updates.
+    
+    Streams query events as they occur, allowing the frontend to show
+    real-time progress without polling.
+    """
+    def event_stream():
+        last_event_id = 0
+        heartbeat_interval = 15  # seconds
+        last_heartbeat = time.time()
+        
+        while True:
+            try:
+                # Get the query
+                query = Query.objects.get(pk=pk)
+                
+                # Get new events since last check
+                events = QueryEvent.objects.filter(
+                    query_id=pk,
+                    id__gt=last_event_id
+                ).order_by('id')
+                
+                for event in events:
+                    data = {
+                        'id': event.id,
+                        'type': event.event_type,
+                        'model': event.model_name,
+                        'message': event.message,
+                        'raw': event.raw_data,
+                        'timestamp': event.created_at.isoformat()
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                    last_event_id = event.id
+                
+                # Check if query is complete or errored
+                if query.status in ['complete', 'error']:
+                    # Send final status event
+                    final_data = {
+                        'type': 'stream_end',
+                        'status': query.status,
+                        'error_message': query.error_message if query.status == 'error' else None
+                    }
+                    yield f"data: {json.dumps(final_data)}\n\n"
+                    break
+                
+                # Send heartbeat to keep connection alive
+                current_time = time.time()
+                if current_time - last_heartbeat > heartbeat_interval:
+                    yield f": heartbeat\n\n"
+                    last_heartbeat = current_time
+                
+                # Brief sleep to prevent tight loop
+                time.sleep(1)
+                
+            except Query.DoesNotExist:
+                error_data = {'type': 'error', 'message': 'Query not found'}
+                yield f"data: {json.dumps(error_data)}\n\n"
+                break
+            except Exception as e:
+                error_data = {'type': 'error', 'message': str(e)}
+                yield f"data: {json.dumps(error_data)}\n\n"
+                break
+    
+    response = StreamingHttpResponse(
+        event_stream(),
+        content_type='text/event-stream'
+    )
+    response['Cache-Control'] = 'no-cache'
+    response['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
+    return response
+
+
+def query_events_json(request, pk):
+    """
+    JSON endpoint to get all events for a query (for initial load or fallback).
+    """
+    query = get_object_or_404(Query, pk=pk)
+    events = QueryEvent.objects.filter(query=query).order_by('created_at')
+    
+    events_data = [{
+        'id': event.id,
+        'type': event.event_type,
+        'model': event.model_name,
+        'message': event.message,
+        'raw': event.raw_data,
+        'timestamp': event.created_at.isoformat()
+    } for event in events]
+    
+    return JsonResponse({
+        'query_id': pk,
+        'status': query.status,
+        'events': events_data
+    })
 
 
 class HistoryView(ListView):
@@ -198,6 +356,32 @@ def delete_model(request, pk):
         name = model.name
         model.delete()
         messages.success(request, f'Model "{name}" deleted.')
+    
+    return redirect('council_app:models')
+
+
+def update_model_timeout(request, pk):
+    """Update a model's timeout setting"""
+    if request.method == 'POST':
+        model = get_object_or_404(ModelConfig, pk=pk)
+        timeout_str = request.POST.get('timeout', '').strip()
+        
+        if timeout_str:
+            try:
+                timeout = int(timeout_str)
+                if 30 <= timeout <= 1800:  # 30 seconds to 30 minutes
+                    model.timeout = timeout
+                    model.save()
+                    messages.success(request, f'Timeout for "{model.name}" set to {timeout}s.')
+                else:
+                    messages.error(request, 'Timeout must be between 30 and 1800 seconds.')
+            except ValueError:
+                messages.error(request, 'Invalid timeout value.')
+        else:
+            # Clear the timeout (use default)
+            model.timeout = None
+            model.save()
+            messages.success(request, f'Timeout for "{model.name}" reset to default.')
     
     return redirect('council_app:models')
 

@@ -14,10 +14,15 @@ urlpatterns = [
     # HTMX endpoints
     path('status/<int:pk>/', views.query_status, name='status'),
     
+    # Server-Sent Events for real-time updates
+    path('events/<int:pk>/stream/', views.query_events_stream, name='events_stream'),
+    path('events/<int:pk>/json/', views.query_events_json, name='events_json'),
+    
     # Model management
     path('models/add/', views.add_model, name='add_model'),
     path('models/<int:pk>/toggle/', views.toggle_model, name='toggle_model'),
     path('models/<int:pk>/delete/', views.delete_model, name='delete_model'),
+    path('models/<int:pk>/timeout/', views.update_model_timeout, name='update_model_timeout'),
     
     # ==========================================================================
     # CHURN MACHINE URLs

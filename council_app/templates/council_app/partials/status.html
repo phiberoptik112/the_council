@@ -11,7 +11,7 @@
 
 {% elif query.status == 'gathering' %}
 <div class="bg-blue-50 border border-blue-200 rounded-xl p-6">
-    <div class="flex items-center">
+    <div class="flex items-center mb-4">
         <svg class="animate-spin w-8 h-8 text-blue-600 mr-4" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -22,19 +22,72 @@
         </div>
     </div>
     
-    <!-- Progress indicator -->
-    <div class="mt-4 grid grid-cols-3 gap-2">
-        {% for i in "123" %}
-        <div class="h-2 bg-blue-200 rounded-full overflow-hidden">
-            <div class="h-full bg-blue-500 rounded-full animate-pulse" style="animation-delay: {{ forloop.counter0 }}00ms;"></div>
+    <!-- Per-Model Status Cards -->
+    {% if model_status %}
+    <div class="mt-4 space-y-2">
+        <h4 class="text-sm font-medium text-blue-800">Model Status:</h4>
+        <div class="grid gap-2">
+            {% for model_name, status in model_status.items %}
+            <div class="flex items-center justify-between bg-white/50 rounded-lg px-3 py-2">
+                <span class="text-sm font-medium text-gray-700">{{ model_name }}</span>
+                <span class="text-xs px-2 py-1 rounded-full
+                    {% if status.status == 'success' %}bg-green-100 text-green-700
+                    {% elif status.status == 'error' or status.status == 'timeout' %}bg-red-100 text-red-700
+                    {% elif status.status == 'querying' %}bg-blue-100 text-blue-700
+                    {% elif status.status == 'retry' %}bg-amber-100 text-amber-700
+                    {% else %}bg-gray-100 text-gray-700{% endif %}">
+                    {% if status.status == 'success' %}
+                        ✓ {{ status.message }}
+                    {% elif status.status == 'error' %}
+                        ✗ Error
+                    {% elif status.status == 'timeout' %}
+                        ⏱ Timeout
+                    {% elif status.status == 'querying' %}
+                        <span class="inline-flex items-center">
+                            <svg class="animate-spin -ml-0.5 mr-1.5 h-3 w-3" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                            </svg>
+                            Querying...
+                        </span>
+                    {% elif status.status == 'retry' %}
+                        ↻ Retrying
+                    {% else %}
+                        {{ status.status }}
+                    {% endif %}
+                </span>
+            </div>
+            {% endfor %}
         </div>
-        {% endfor %}
     </div>
+    {% endif %}
+    
+    <!-- Event Log (Collapsible) -->
+    {% if events %}
+    <details class="mt-4">
+        <summary class="text-sm font-medium text-blue-800 cursor-pointer hover:text-blue-900">
+            Event Log ({{ events|length }} events)
+        </summary>
+        <div class="mt-2 bg-white/50 rounded-lg p-3 max-h-48 overflow-y-auto">
+            <div class="space-y-1 text-xs font-mono">
+                {% for event in events %}
+                <div class="flex items-start gap-2 {% if event.event_type == 'error' or event.event_type == 'timeout' %}text-red-600{% elif event.event_type == 'success' %}text-green-600{% else %}text-gray-600{% endif %}">
+                    <span class="text-gray-400 whitespace-nowrap">{{ event.created_at|time:"H:i:s" }}</span>
+                    <span class="flex-1">
+                        {% if event.model_name %}[{{ event.model_name }}]{% endif %}
+                        {{ event.message|default:event.get_event_type_display }}
+                    </span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+    {% endif %}
 </div>
 
 {% elif query.status == 'voting' %}
 <div class="bg-purple-50 border border-purple-200 rounded-xl p-6">
-    <div class="flex items-center">
+    <div class="flex items-center mb-4">
         <svg class="animate-bounce w-8 h-8 text-purple-600 mr-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path>
         </svg>
@@ -43,6 +96,60 @@
             <p class="text-purple-700">Members are evaluating and ranking responses...</p>
         </div>
     </div>
+    
+    <!-- Per-Model Voting Status -->
+    {% if model_status %}
+    <div class="mt-4 space-y-2">
+        <h4 class="text-sm font-medium text-purple-800">Voting Status:</h4>
+        <div class="grid gap-2">
+            {% for model_name, status in model_status.items %}
+            <div class="flex items-center justify-between bg-white/50 rounded-lg px-3 py-2">
+                <span class="text-sm font-medium text-gray-700">{{ model_name }}</span>
+                <span class="text-xs px-2 py-1 rounded-full
+                    {% if status.status == 'voted' %}bg-green-100 text-green-700
+                    {% elif status.status == 'voting' %}bg-purple-100 text-purple-700
+                    {% else %}bg-gray-100 text-gray-700{% endif %}">
+                    {% if status.status == 'voted' %}
+                        ✓ {{ status.message }}
+                    {% elif status.status == 'voting' %}
+                        <span class="inline-flex items-center">
+                            <svg class="animate-spin -ml-0.5 mr-1.5 h-3 w-3" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                            </svg>
+                            Voting...
+                        </span>
+                    {% else %}
+                        Waiting
+                    {% endif %}
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    
+    <!-- Event Log -->
+    {% if events %}
+    <details class="mt-4">
+        <summary class="text-sm font-medium text-purple-800 cursor-pointer hover:text-purple-900">
+            Event Log ({{ events|length }} events)
+        </summary>
+        <div class="mt-2 bg-white/50 rounded-lg p-3 max-h-48 overflow-y-auto">
+            <div class="space-y-1 text-xs font-mono">
+                {% for event in events %}
+                <div class="flex items-start gap-2 {% if event.event_type == 'error' %}text-red-600{% elif event.event_type == 'voted' %}text-green-600{% else %}text-gray-600{% endif %}">
+                    <span class="text-gray-400 whitespace-nowrap">{{ event.created_at|time:"H:i:s" }}</span>
+                    <span class="flex-1">
+                        {% if event.model_name %}[{{ event.model_name }}]{% endif %}
+                        {{ event.message|default:event.get_event_type_display }}
+                    </span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+    {% endif %}
 </div>
 
 {% elif query.status == 'complete' %}

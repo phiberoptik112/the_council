@@ -70,7 +70,7 @@ class LLMCouncil:
         self,
         models: List[str],
         ollama_url: str = "http://localhost:11434",
-        timeout: int = 60,
+        timeout: int = 300,
         retries: int = 2,
         exclude_self_vote: bool = True
     ):
@@ -116,9 +116,15 @@ class LLMCouncil:
         logger.debug(f"Querying model '{model}' at {api_url}")
         logger.debug(f"Prompt length: {len(prompt)} chars, Timeout: {self.timeout}s")
         
+        # Notify that we're starting to query this model
+        if callback:
+            callback(model, "querying", None)
+        
         for attempt in range(self.retries + 1):
             if attempt > 0:
                 logger.debug(f"Retry attempt {attempt} for model '{model}'")
+                if callback:
+                    callback(model, "retry", f"Attempt {attempt + 1}")
             
             try:
                 timeout = aiohttp.ClientTimeout(total=self.timeout)
@@ -170,6 +176,8 @@ class LLMCouncil:
             except asyncio.TimeoutError:
                 last_error = f"Timeout after {self.timeout}s waiting for model '{model}' - the model may be too slow or Ollama is overloaded"
                 logger.warning(f"Timeout querying '{model}' (attempt {attempt + 1}/{self.retries + 1})")
+                if callback and attempt == self.retries:  # Only callback on final timeout
+                    callback(model, "timeout", last_error)
             except aiohttp.ClientConnectorError as e:
                 last_error = f"Connection failed to {self.ollama_url}: {e}. Is Ollama running? Try 'systemctl status ollama' or 'ollama serve'"
                 logger.error(f"Connection error to Ollama: {e}")

@@ -147,7 +147,7 @@ Q_CLUSTER = {
 # Council Configuration
 COUNCIL_CONFIG = {
     'OLLAMA_URL': 'http://localhost:11434',
-    'DEFAULT_TIMEOUT': 60,
+    'DEFAULT_TIMEOUT': 300,  # 5 minutes - suitable for CPU-only inference on Raspberry Pi
     'DEFAULT_RETRIES': 2,
     'EXCLUDE_SELF_VOTE': True,
 }

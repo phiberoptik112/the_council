@@ -61,6 +61,27 @@
                     </div>
                     
                     <div class="flex items-center gap-6">
+                        <!-- Timeout Setting -->
+                        <form method="post" action="{% url 'council_app:update_model_timeout' model.id %}" class="flex items-center gap-2">
+                            {% csrf_token %}
+                            <div class="text-center">
+                                <input 
+                                    type="number" 
+                                    name="timeout" 
+                                    value="{{ model.timeout|default:'' }}"
+                                    placeholder="default"
+                                    min="30"
+                                    max="1800"
+                                    class="w-20 px-2 py-1 text-sm text-center border border-gray-300 rounded focus:ring-1 focus:ring-council-500 focus:border-council-500">
+                                <p class="text-xs text-gray-500 mt-1">Timeout (s)</p>
+                            </div>
+                            <button type="submit" class="p-1 text-gray-400 hover:text-council-600" title="Save timeout">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                                </svg>
+                            </button>
+                        </form>
+                        
                         <!-- Stats -->
                         <div class="text-center">
                             <p class="text-lg font-bold text-gray-900">{{ model.total_queries }}</p>
