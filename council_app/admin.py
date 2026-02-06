@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (
     ModelConfig, Query, Response, Vote, QueryTag,
-    CreativeProject, ChurnIteration, IterationFeedback
+    CreativeProject, ChurnIteration, IterationFeedback,
+    ReportKnowledgeBase, ReportOutline, ReportSection
 )
 
 
@@ -81,3 +82,40 @@ class IterationFeedbackAdmin(admin.ModelAdmin):
     list_display = ['id', 'iteration', 'response_count', 'created_at']
     raw_id_fields = ['iteration']
     search_fields = ['synthesized_feedback']
+
+
+# =============================================================================
+# TECHNICAL REPORT REVIEWER ADMIN
+# =============================================================================
+
+@admin.register(ReportKnowledgeBase)
+class ReportKnowledgeBaseAdmin(admin.ModelAdmin):
+    list_display = ['name', 'description_preview', 'created_at', 'updated_at']
+    search_fields = ['name', 'description', 'content']
+    date_hierarchy = 'created_at'
+    
+    def description_preview(self, obj):
+        return obj.description[:80] + '...' if len(obj.description) > 80 else obj.description
+    description_preview.short_description = 'Description'
+
+
+@admin.register(ReportOutline)
+class ReportOutlineAdmin(admin.ModelAdmin):
+    list_display = ['project', 'report_type', 'processing_mode', 'section_count', 'created_at']
+    list_filter = ['report_type', 'processing_mode']
+    raw_id_fields = ['project', 'knowledgebase']
+    search_fields = ['project__title', 'raw_outline']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(ReportSection)
+class ReportSectionAdmin(admin.ModelAdmin):
+    list_display = ['section_title', 'report_project', 'order', 'status', 'compliance_percent', 'iteration_count', 'updated_at']
+    list_filter = ['status', 'report_outline__project']
+    search_fields = ['section_title', 'original_content', 'current_content']
+    raw_id_fields = ['report_outline']
+    date_hierarchy = 'created_at'
+    
+    def report_project(self, obj):
+        return obj.report_outline.project.title
+    report_project.short_description = 'Project'

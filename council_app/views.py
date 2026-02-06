@@ -12,12 +12,14 @@ from django.urls import reverse
 
 from .models import (
     Query, Response, Vote, ModelConfig, QueryTag, QueryEvent,
-    CreativeProject, ChurnIteration, IterationFeedback
+    CreativeProject, ChurnIteration, IterationFeedback,
+    ReportKnowledgeBase, ReportOutline, ReportSection
 )
 from .forms import (
     QueryForm, ModelConfigForm, AddModelForm,
     CreativeProjectForm, SubmitContentForm, BranchForm,
-    BatchChurnForm, TriggerChurnForm
+    BatchChurnForm, TriggerChurnForm,
+    ReportKnowledgeBaseForm, ReportOutlineForm, SectionReviewForm
 )
 from .utils import get_system_info
 
@@ -445,6 +447,11 @@ class CreateProjectView(TemplateView):
             # Set default models
             project.default_models.set(ModelConfig.objects.filter(pk__in=models))
             
+            # Route to report setup if content type is report
+            if project.content_type == CreativeProject.ContentType.REPORT:
+                messages.success(request, f'Project "{project.title}" created! Now set up your report outline.')
+                return redirect('council_app:report_setup', pk=project.id)
+            
             messages.success(request, f'Project "{project.title}" created! Now add your content.')
             return redirect('council_app:churn_submit', pk=project.id)
         
@@ -768,5 +775,330 @@ class BatchChurnView(View):
         
         messages.error(request, 'Invalid batch settings.')
         return redirect('council_app:churn_iteration', pk=pk)
+
+
+# =============================================================================
+# TECHNICAL REPORT REVIEWER VIEWS
+# =============================================================================
+
+class KnowledgeBaseListView(ListView):
+    """List all report knowledgebases"""
+    model = ReportKnowledgeBase
+    template_name = 'council_app/churn/kb_list.html'
+    context_object_name = 'knowledgebases'
+    paginate_by = 12
+
+
+class KnowledgeBaseCreateView(TemplateView):
+    """Create a new knowledgebase"""
+    template_name = 'council_app/churn/kb_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['form'] = ReportKnowledgeBaseForm()
+        context['is_edit'] = False
+        return context
+    
+    def post(self, request):
+        form = ReportKnowledgeBaseForm(request.POST)
+        if form.is_valid():
+            kb = form.save()
+            messages.success(request, f'Knowledge base "{kb.name}" created!')
+            return redirect('council_app:kb_detail', pk=kb.id)
+        
+        return render(request, self.template_name, {
+            'form': form,
+            'is_edit': False,
+        })
+
+
+class KnowledgeBaseDetailView(TemplateView):
+    """View/edit a knowledgebase"""
+    template_name = 'council_app/churn/kb_form.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        kb = get_object_or_404(ReportKnowledgeBase, pk=self.kwargs['pk'])
+        context['kb'] = kb
+        context['form'] = ReportKnowledgeBaseForm(instance=kb)
+        context['is_edit'] = True
+        # Show reports using this KB
+        context['linked_outlines'] = kb.report_outlines.select_related('project').all()
+        return context
+    
+    def post(self, request, pk):
+        kb = get_object_or_404(ReportKnowledgeBase, pk=pk)
+        form = ReportKnowledgeBaseForm(request.POST, instance=kb)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Knowledge base "{kb.name}" updated!')
+            return redirect('council_app:kb_detail', pk=kb.id)
+        
+        return render(request, self.template_name, {
+            'kb': kb,
+            'form': form,
+            'is_edit': True,
+            'linked_outlines': kb.report_outlines.select_related('project').all(),
+        })
+
+
+class ReportSetupView(TemplateView):
+    """Set up a report outline for a project"""
+    template_name = 'council_app/churn/report_setup.html'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        project = get_object_or_404(CreativeProject, pk=self.kwargs['pk'])
+        context['project'] = project
+        context['form'] = ReportOutlineForm()
+        context['models'] = ModelConfig.objects.filter(is_active=True)
+        context['default_model_ids'] = list(project.default_models.values_list('id', flat=True))
+        
+        # Check if outline already exists
+        try:
+            context['existing_outline'] = project.report_outline
+        except ReportOutline.DoesNotExist:
+            context['existing_outline'] = None
+        
+        return context
+    
+    def post(self, request, pk):
+        project = get_object_or_404(CreativeProject, pk=pk)
+        form = ReportOutlineForm(request.POST)
+        
+        if form.is_valid():
+            # Parse the outline
+            from .report_churn import OutlineParser
+            parser = OutlineParser()
+            parsed = parser.parse(form.cleaned_data['raw_outline'])
+            
+            if not parsed:
+                messages.error(request, 'Could not parse any sections from the outline. Check your formatting.')
+                return redirect('council_app:report_setup', pk=pk)
+            
+            # Create or update the ReportOutline
+            outline, created = ReportOutline.objects.update_or_create(
+                project=project,
+                defaults={
+                    'raw_outline': form.cleaned_data['raw_outline'],
+                    'parsed_sections': parsed,
+                    'knowledgebase': form.cleaned_data.get('knowledgebase'),
+                    'report_type': form.cleaned_data['report_type'],
+                    'target_audience': form.cleaned_data.get('target_audience', ''),
+                    'processing_mode': form.cleaned_data['processing_mode'],
+                }
+            )
+            
+            # Create ReportSection objects for each parsed section
+            for section_data in parsed:
+                ReportSection.objects.get_or_create(
+                    report_outline=outline,
+                    section_id=section_data['id'],
+                    defaults={
+                        'section_title': section_data['title'],
+                        'original_content': section_data.get('content', ''),
+                        'current_content': section_data.get('content', ''),
+                        'order': section_data.get('order', 0),
+                    }
+                )
+            
+            action = 'updated' if not created else 'created'
+            messages.success(
+                request,
+                f'Report outline {action} with {len(parsed)} sections!'
+            )
+            return redirect('council_app:report_detail', pk=project.id)
+        
+        return render(request, self.template_name, {
+            'project': project,
+            'form': form,
+            'models': ModelConfig.objects.filter(is_active=True),
+            'default_model_ids': list(project.default_models.values_list('id', flat=True)),
+        })
+
+
+class ReportDetailView(DetailView):
+    """Dashboard showing all sections with status/compliance scores"""
+    model = CreativeProject
+    template_name = 'council_app/churn/report_detail.html'
+    context_object_name = 'project'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        project = self.object
+        
+        try:
+            outline = project.report_outline
+            context['outline'] = outline
+            context['sections'] = outline.sections.all().order_by('order')
+            context['progress_percent'] = outline.progress_percent
+            context['total_sections'] = outline.sections.count()
+            context['approved_sections'] = outline.sections.filter(
+                status=ReportSection.Status.APPROVED
+            ).count()
+            context['review_sections'] = outline.sections.filter(
+                status=ReportSection.Status.REVIEW
+            ).count()
+            context['pending_sections'] = outline.sections.filter(
+                status__in=[
+                    ReportSection.Status.PENDING,
+                    ReportSection.Status.NEEDS_REVISION,
+                ]
+            ).count()
+            context['in_progress_sections'] = outline.sections.filter(
+                status=ReportSection.Status.IN_PROGRESS
+            ).count()
+        except ReportOutline.DoesNotExist:
+            context['outline'] = None
+            context['sections'] = []
+        
+        context['models'] = ModelConfig.objects.filter(is_active=True)
+        context['default_model_ids'] = list(
+            project.default_models.values_list('id', flat=True)
+        )
+        
+        return context
+
+
+class SectionDetailView(DetailView):
+    """View a single report section with feedback and diff"""
+    model = ReportSection
+    template_name = 'council_app/churn/section_detail.html'
+    context_object_name = 'section'
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        section = self.object
+        outline = section.report_outline
+        project = outline.project
+        
+        context['project'] = project
+        context['outline'] = outline
+        context['review_form'] = SectionReviewForm()
+        context['models'] = ModelConfig.objects.filter(is_active=True)
+        context['default_model_ids'] = list(
+            project.default_models.values_list('id', flat=True)
+        )
+        
+        # Parse diff for display
+        if section.content_diff:
+            context['diff_lines'] = parse_diff_for_display(section.content_diff)
+        
+        # Get feedback details from JSON
+        feedback = section.council_feedback or {}
+        context['synthesized_feedback'] = feedback.get('synthesized_feedback', '')
+        context['processing_time'] = feedback.get('processing_time')
+        
+        # Navigation: previous and next sections
+        all_sections = list(outline.sections.order_by('order'))
+        current_idx = next(
+            (i for i, s in enumerate(all_sections) if s.pk == section.pk), 0
+        )
+        context['prev_section'] = all_sections[current_idx - 1] if current_idx > 0 else None
+        context['next_section'] = all_sections[current_idx + 1] if current_idx < len(all_sections) - 1 else None
+        
+        return context
+
+
+class TriggerSectionChurnView(View):
+    """Trigger council review for a single section"""
+    
+    def post(self, request, pk):
+        section = get_object_or_404(ReportSection, pk=pk)
+        models = request.POST.getlist('models')
+        
+        if not models or len(models) < 2:
+            messages.error(request, 'Please select at least 2 models for the council.')
+            return redirect('council_app:section_detail', pk=pk)
+        
+        # Queue the section churn task
+        from django_q.tasks import async_task
+        async_task(
+            'council_app.tasks.run_report_section_churn',
+            section.id,
+            [int(m) for m in models],
+            task_name=f'report_section_{section.id}'
+        )
+        
+        messages.success(request, f'Section "{section.section_title}" submitted for review!')
+        return redirect('council_app:section_detail', pk=pk)
+
+
+class TriggerFullReportChurnView(View):
+    """Trigger council review for all pending sections"""
+    
+    def post(self, request, pk):
+        project = get_object_or_404(CreativeProject, pk=pk)
+        models = request.POST.getlist('models')
+        auto_advance = request.POST.get('auto_advance', '') == 'on'
+        
+        if not models or len(models) < 2:
+            messages.error(request, 'Please select at least 2 models for the council.')
+            return redirect('council_app:report_detail', pk=pk)
+        
+        try:
+            outline = project.report_outline
+        except ReportOutline.DoesNotExist:
+            messages.error(request, 'No report outline found. Please set one up first.')
+            return redirect('council_app:report_setup', pk=pk)
+        
+        # Queue the full report churn task
+        from django_q.tasks import async_task
+        async_task(
+            'council_app.tasks.run_full_report_churn',
+            outline.id,
+            [int(m) for m in models],
+            auto_advance,
+            task_name=f'full_report_{outline.id}'
+        )
+        
+        mode = 'all sections' if auto_advance else 'next pending section'
+        messages.success(request, f'Report review started! Processing {mode}...')
+        return redirect('council_app:report_detail', pk=pk)
+
+
+class ApproveSectionView(View):
+    """Handle section review actions: approve, revise, or edit"""
+    
+    def post(self, request, pk):
+        section = get_object_or_404(ReportSection, pk=pk)
+        form = SectionReviewForm(request.POST)
+        
+        if form.is_valid():
+            action = form.cleaned_data['action']
+            
+            if action == 'approve':
+                section.mark_approved()
+                messages.success(request, f'Section "{section.section_title}" approved!')
+            
+            elif action == 'revise':
+                section.mark_needs_revision()
+                messages.info(request, f'Section "{section.section_title}" marked for revision.')
+            
+            elif action == 'edit':
+                edited_content = form.cleaned_data.get('edited_content', '').strip()
+                if edited_content:
+                    section.current_content = edited_content
+                    section.mark_approved()
+                    messages.success(
+                        request,
+                        f'Section "{section.section_title}" updated and approved!'
+                    )
+                else:
+                    messages.error(request, 'Please provide edited content when using "Edit Manually".')
+                    return redirect('council_app:section_detail', pk=pk)
+            
+            return redirect('council_app:report_detail', pk=section.report_outline.project.id)
+        
+        messages.error(request, 'Invalid form submission.')
+        return redirect('council_app:section_detail', pk=pk)
+
+
+def section_status(request, pk):
+    """HTMX endpoint for polling section processing status"""
+    section = get_object_or_404(ReportSection, pk=pk)
+    return render(request, 'council_app/churn/partials/section_status.html', {
+        'section': section
+    })
 
 

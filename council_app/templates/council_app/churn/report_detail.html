@@ -1,0 +1,215 @@
+{% extends 'council_app/base.html' %}
+
+{% block title %}Report Dashboard - {{ project.title }}{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto">
+    <!-- Header -->
+    <div class="flex items-start justify-between mb-6">
+        <div>
+            <a href="{% url 'council_app:churn_list' %}" class="text-teal-600 hover:text-teal-700 text-sm flex items-center">
+                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                </svg>
+                Back to Projects
+            </a>
+            <h1 class="text-3xl font-bold text-gray-900 mt-2">{{ project.title }}</h1>
+            <p class="text-gray-600 mt-1">{{ project.description|default:"Technical Report" }}</p>
+        </div>
+        <div class="flex space-x-2">
+            <a href="{% url 'council_app:report_setup' pk=project.id %}" 
+               class="px-3 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
+                Edit Outline
+            </a>
+            {% if outline.knowledgebase %}
+            <a href="{% url 'council_app:kb_detail' pk=outline.knowledgebase.id %}" 
+               class="px-3 py-2 text-sm text-teal-600 bg-teal-50 rounded-lg hover:bg-teal-100 transition-colors">
+                Knowledge Base
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    
+    {% if not outline %}
+    <div class="bg-white rounded-lg shadow-sm p-12 text-center">
+        <h3 class="text-lg font-medium text-gray-900">No outline set up yet</h3>
+        <p class="mt-2 text-gray-500">Set up your report outline to start the review process.</p>
+        <a href="{% url 'council_app:report_setup' pk=project.id %}" 
+           class="mt-4 inline-block px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors">
+            Set Up Outline
+        </a>
+    </div>
+    {% else %}
+    
+    <!-- Progress Overview -->
+    <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
+        <div class="flex items-center justify-between mb-3">
+            <h2 class="text-lg font-semibold text-gray-900">Progress</h2>
+            <span class="text-2xl font-bold text-teal-600">{{ progress_percent }}%</span>
+        </div>
+        <!-- Progress Bar -->
+        <div class="w-full bg-gray-200 rounded-full h-3 mb-4">
+            <div class="bg-teal-500 h-3 rounded-full transition-all duration-500" 
+                 style="width: {{ progress_percent }}%"></div>
+        </div>
+        <div class="grid grid-cols-4 gap-4 text-center text-sm">
+            <div>
+                <span class="block text-2xl font-bold text-green-600">{{ approved_sections }}</span>
+                <span class="text-gray-500">Approved</span>
+            </div>
+            <div>
+                <span class="block text-2xl font-bold text-yellow-600">{{ review_sections }}</span>
+                <span class="text-gray-500">Awaiting Review</span>
+            </div>
+            <div>
+                <span class="block text-2xl font-bold text-blue-600">{{ in_progress_sections }}</span>
+                <span class="text-gray-500">In Progress</span>
+            </div>
+            <div>
+                <span class="block text-2xl font-bold text-gray-400">{{ pending_sections }}</span>
+                <span class="text-gray-500">Pending</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Bulk Actions -->
+    {% if pending_sections > 0 or review_sections > 0 %}
+    <div class="bg-white rounded-lg shadow-sm p-4 mb-6">
+        <form method="post" action="{% url 'council_app:report_churn_all' pk=project.id %}" class="flex items-center space-x-4">
+            {% csrf_token %}
+            
+            <div class="flex-1">
+                <span class="text-sm font-medium text-gray-700">Process pending sections:</span>
+            </div>
+            
+            <label class="flex items-center text-sm text-gray-600">
+                <input type="checkbox" name="auto_advance" class="h-4 w-4 text-teal-600 border-gray-300 rounded mr-2">
+                Process all sections
+            </label>
+            
+            <!-- Model Selection (compact) -->
+            <div class="flex items-center space-x-2">
+                {% for model in models %}
+                <label class="flex items-center text-xs">
+                    <input type="checkbox" name="models" value="{{ model.id }}"
+                           {% if model.id in default_model_ids %}checked{% endif %}
+                           class="h-3 w-3 text-teal-600 border-gray-300 rounded mr-1">
+                    {{ model.display_name|default:model.name|truncatechars:12 }}
+                </label>
+                {% endfor %}
+            </div>
+            
+            <button type="submit" 
+                    class="px-4 py-2 bg-teal-600 text-white text-sm rounded-lg hover:bg-teal-700 transition-colors font-medium">
+                Start Review
+            </button>
+        </form>
+    </div>
+    {% endif %}
+    
+    <!-- Sections List -->
+    <div class="space-y-3">
+        <h2 class="text-lg font-semibold text-gray-900">Sections</h2>
+        
+        {% for section in sections %}
+        <div class="bg-white rounded-lg shadow-sm p-4 border-l-4 
+                    {% if section.status == 'approved' %}border-green-500
+                    {% elif section.status == 'review' %}border-yellow-500
+                    {% elif section.status == 'in_progress' %}border-blue-500
+                    {% elif section.status == 'needs_revision' %}border-orange-500
+                    {% else %}border-gray-300{% endif %}
+                    hover:shadow-md transition-shadow"
+             {% if section.status == 'in_progress' %}
+             hx-get="{% url 'council_app:section_status' pk=section.id %}"
+             hx-trigger="every 3s"
+             hx-target="#section-status-{{ section.id }}"
+             hx-swap="innerHTML"
+             {% endif %}>
+            
+            <div class="flex items-center justify-between">
+                <div class="flex-1">
+                    <div class="flex items-center space-x-3">
+                        <span class="text-sm text-gray-400 font-mono">{{ section.order }}.</span>
+                        <a href="{% url 'council_app:section_detail' pk=section.id %}" 
+                           class="text-lg font-medium text-gray-900 hover:text-teal-600 transition-colors">
+                            {{ section.section_title }}
+                        </a>
+                        
+                        <!-- Status Badge -->
+                        <span class="px-2 py-0.5 text-xs font-medium rounded-full
+                                     {% if section.status == 'approved' %}bg-green-100 text-green-700
+                                     {% elif section.status == 'review' %}bg-yellow-100 text-yellow-700
+                                     {% elif section.status == 'in_progress' %}bg-blue-100 text-blue-700
+                                     {% elif section.status == 'needs_revision' %}bg-orange-100 text-orange-700
+                                     {% else %}bg-gray-100 text-gray-600{% endif %}">
+                            {{ section.get_status_display }}
+                        </span>
+                    </div>
+                    
+                    <div class="flex items-center mt-2 space-x-4 text-sm text-gray-500">
+                        {% if section.original_content %}
+                        <span>{{ section.original_content|truncatechars:80 }}</span>
+                        {% else %}
+                        <span class="italic">No initial content</span>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="flex items-center space-x-4 ml-4">
+                    <!-- Compliance Score -->
+                    {% if section.compliance_percent is not None %}
+                    <div class="text-center">
+                        <span class="block text-lg font-bold 
+                                     {% if section.compliance_score >= 0.7 %}text-green-600
+                                     {% elif section.compliance_score >= 0.4 %}text-yellow-600
+                                     {% else %}text-red-600{% endif %}">
+                            {{ section.compliance_percent }}%
+                        </span>
+                        <span class="text-xs text-gray-400">Compliance</span>
+                    </div>
+                    {% endif %}
+                    
+                    {% if section.iteration_count > 0 %}
+                    <div class="text-center">
+                        <span class="block text-lg font-bold text-gray-600">{{ section.iteration_count }}</span>
+                        <span class="text-xs text-gray-400">Iteration{{ section.iteration_count|pluralize }}</span>
+                    </div>
+                    {% endif %}
+                    
+                    <a href="{% url 'council_app:section_detail' pk=section.id %}" 
+                       class="px-3 py-1.5 text-sm text-teal-600 bg-teal-50 rounded-lg hover:bg-teal-100 transition-colors">
+                        View
+                    </a>
+                </div>
+            </div>
+            
+            <!-- Inline status for in_progress sections -->
+            <div id="section-status-{{ section.id }}">
+                {% if section.status == 'in_progress' %}
+                <div class="mt-3 flex items-center space-x-2 text-sm text-blue-600">
+                    <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                    <span>Council is reviewing this section...</span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    <!-- Report Info -->
+    <div class="mt-8 bg-gray-50 rounded-lg p-4 text-sm text-gray-500">
+        <div class="flex items-center space-x-6">
+            <span>Type: <strong>{{ outline.get_report_type_display }}</strong></span>
+            <span>Mode: <strong>{{ outline.get_processing_mode_display }}</strong></span>
+            {% if outline.target_audience %}
+            <span>Audience: <strong>{{ outline.target_audience }}</strong></span>
+            {% endif %}
+            {% if outline.knowledgebase %}
+            <span>KB: <strong>{{ outline.knowledgebase.name }}</strong></span>
+            {% endif %}
+        </div>
+    </div>
+    
+    {% endif %}
+</div>
+{% endblock %}

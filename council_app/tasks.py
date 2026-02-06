@@ -8,7 +8,10 @@ from django.conf import settings
 from django.utils import timezone
 from asgiref.sync import sync_to_async
 
-from .models import Query, Response, Vote, ModelConfig, ChurnIteration, IterationFeedback, CreativeProject, QueryEvent
+from .models import (
+    Query, Response, Vote, ModelConfig, ChurnIteration, IterationFeedback,
+    CreativeProject, QueryEvent, ReportSection, ReportOutline
+)
 
 # Set up loggers for debugging
 logger = logging.getLogger('council_app.tasks')
@@ -436,6 +439,7 @@ def run_churn_iteration(iteration_id: int, model_ids: list, context: str = ""):
             'edit': ChurnType.EDIT,
             'expand': ChurnType.EXPAND,
             'explore': ChurnType.EXPLORE,
+            'report': ChurnType.REPORT,
         }
         churn_type = churn_type_map.get(iteration.churn_type, ChurnType.EDIT)
         logger.info(f"Churn type: {churn_type.value}")
@@ -527,6 +531,7 @@ def run_batch_churn(
             'edit': ChurnType.EDIT,
             'expand': ChurnType.EXPAND,
             'explore': ChurnType.EXPLORE,
+            'report': ChurnType.REPORT,
         }
         churn_enum = churn_type_map.get(churn_type, ChurnType.EDIT)
         
@@ -617,3 +622,202 @@ async def run_batch_churn_async(
             return f"Batch churn failed at iteration {i+1}: {e}"
     
     return f"Batch churn completed: {completed_iterations}/{num_iterations} iterations"
+
+
+# =============================================================================
+# TECHNICAL REPORT REVIEWER TASKS
+# =============================================================================
+
+def run_report_section_churn(section_id: int, model_ids: list):
+    """
+    Background task to process a single report section through the council.
+
+    Args:
+        section_id: ID of the ReportSection object
+        model_ids: List of ModelConfig IDs to use
+    """
+    logger.info(f"=== Starting report section churn for section {section_id} ===")
+    logger.debug(f"Model IDs: {model_ids}")
+
+    try:
+        section = ReportSection.objects.select_related(
+            'report_outline',
+            'report_outline__knowledgebase',
+            'report_outline__project'
+        ).get(id=section_id)
+        logger.debug(f"Found section: '{section.section_title}' in project: {section.report_outline.project.title}")
+    except ReportSection.DoesNotExist:
+        logger.error(f"ReportSection {section_id} not found in database")
+        return f"ReportSection {section_id} not found"
+
+    try:
+        # Get model configs
+        model_configs = list(ModelConfig.objects.filter(id__in=model_ids, is_active=True))
+        logger.info(f"Found {len(model_configs)} active models from {len(model_ids)} requested")
+
+        if len(model_configs) < 2:
+            logger.error(f"Not enough active models: {len(model_configs)} < 2")
+            section.mark_error("Not enough active models selected")
+            return "Not enough models"
+
+        model_names = [m.name for m in model_configs]
+        logger.info(f"Using models: {model_names}")
+
+        # Update status to in progress
+        section.mark_in_progress()
+        logger.debug("Section status set to IN_PROGRESS")
+
+        # Import report churn engine
+        from .report_churn import ReportChurnEngine
+
+        # Get council config from settings
+        config = getattr(settings, 'COUNCIL_CONFIG', {})
+        ollama_url = config.get('OLLAMA_URL', 'http://localhost:11434')
+        default_timeout = config.get('DEFAULT_TIMEOUT', 300)
+        retries = config.get('DEFAULT_RETRIES', 2)
+
+        # Use per-model timeouts if available
+        model_timeouts = [m.timeout for m in model_configs if m.timeout]
+        timeout = max(model_timeouts) if model_timeouts else default_timeout
+
+        logger.info(f"Council config - Ollama URL: {ollama_url}, Timeout: {timeout}s, Retries: {retries}")
+
+        # Get knowledgebase content
+        kb_content = ""
+        outline = section.report_outline
+        if outline.knowledgebase:
+            kb_content = outline.knowledgebase.get_relevant_context(
+                section.section_title,
+                section.original_content or section.current_content
+            )
+            logger.debug(f"Knowledgebase content: {len(kb_content)} chars")
+
+        # Get preceding approved sections for context
+        preceding = ReportSection.objects.filter(
+            report_outline=outline,
+            status=ReportSection.Status.APPROVED,
+            order__lt=section.order
+        ).order_by('order')[:3]
+
+        preceding_sections = [
+            {'title': s.section_title, 'content': s.current_content}
+            for s in preceding
+        ]
+        logger.debug(f"Preceding approved sections: {len(preceding_sections)}")
+
+        # Create engine and process
+        logger.debug(f"Creating ReportChurnEngine with {len(model_names)} models")
+        engine = ReportChurnEngine(
+            models=model_names,
+            ollama_url=ollama_url,
+            timeout=timeout,
+            retries=retries,
+            knowledgebase_content=kb_content
+        )
+
+        # Run the section review (async)
+        content_to_review = section.current_content or section.original_content
+        logger.info(f"Starting async section review for '{section.section_title}' ({len(content_to_review)} chars)")
+
+        result = asyncio.run(
+            engine.process_section_async(
+                section_id=section.section_id,
+                section_title=section.section_title,
+                section_content=content_to_review,
+                knowledge_context=kb_content,
+                full_outline=outline.raw_outline,
+                preceding_sections=preceding_sections
+            )
+        )
+        logger.info(f"Section review completed in {result.processing_time:.1f}s")
+        logger.debug(f"Compliance score: {result.compliance_score}")
+
+        # Update section with results
+        section.current_content = result.revised_content
+        section.content_diff = result.content_diff
+        section.council_feedback = {
+            'synthesized_feedback': result.synthesized_feedback,
+            'processing_time': result.processing_time,
+        }
+        section.compliance_score = result.compliance_score
+        section.raw_responses = result.raw_responses
+        section.knowledge_context = kb_content
+        section.iteration_count += 1
+        section.status = ReportSection.Status.REVIEW
+        section.error_message = ''
+        section.save()
+
+        logger.info(f"=== Report section '{section.section_title}' processed successfully ===")
+        return f"Section '{section.section_title}' processed successfully"
+
+    except Exception as e:
+        logger.exception(f"Report section {section_id} failed with exception: {e}")
+        section.mark_error(str(e))
+        return f"Report section {section_id} failed: {e}"
+
+
+def run_full_report_churn(report_outline_id: int, model_ids: list, auto_advance: bool = False):
+    """
+    Background task to process all sections of a report outline.
+
+    Args:
+        report_outline_id: ID of the ReportOutline object
+        model_ids: List of ModelConfig IDs to use
+        auto_advance: If True, process all sections sequentially.
+                      If False, stop after first pending section.
+    """
+    logger.info(f"=== Starting full report churn for outline {report_outline_id} ===")
+    logger.debug(f"Model IDs: {model_ids}, Auto-advance: {auto_advance}")
+
+    try:
+        outline = ReportOutline.objects.select_related(
+            'project', 'knowledgebase'
+        ).get(id=report_outline_id)
+        logger.debug(f"Found outline for project: {outline.project.title}")
+    except ReportOutline.DoesNotExist:
+        logger.error(f"ReportOutline {report_outline_id} not found")
+        return f"ReportOutline {report_outline_id} not found"
+
+    try:
+        # Ensure sections exist from parsed_sections
+        for section_data in outline.parsed_sections:
+            ReportSection.objects.get_or_create(
+                report_outline=outline,
+                section_id=section_data['id'],
+                defaults={
+                    'section_title': section_data['title'],
+                    'original_content': section_data.get('content', ''),
+                    'current_content': section_data.get('content', ''),
+                    'order': section_data.get('order', 0),
+                }
+            )
+
+        # Get sections to process
+        sections = ReportSection.objects.filter(
+            report_outline=outline,
+            status__in=[
+                ReportSection.Status.PENDING,
+                ReportSection.Status.NEEDS_REVISION,
+            ]
+        ).order_by('order')
+
+        if not sections.exists():
+            logger.info("No pending sections to process")
+            return "No pending sections to process"
+
+        processed_count = 0
+        for section in sections:
+            logger.info(f"Processing section: '{section.section_title}'")
+            result = run_report_section_churn(section.id, model_ids)
+            logger.info(f"Section result: {result}")
+            processed_count += 1
+
+            if not auto_advance:
+                logger.info("Auto-advance disabled, stopping after first section")
+                break
+
+        return f"Report churn completed: {processed_count} sections processed"
+
+    except Exception as e:
+        logger.exception(f"Full report churn failed: {e}")
+        return f"Full report churn failed: {e}"

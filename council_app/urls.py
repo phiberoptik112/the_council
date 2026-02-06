@@ -45,4 +45,26 @@ urlpatterns = [
     
     # HTMX endpoints for churn
     path('churn/iteration/<int:pk>/status/', views.iteration_status, name='iteration_status'),
+    
+    # ==========================================================================
+    # TECHNICAL REPORT REVIEWER URLs
+    # ==========================================================================
+    
+    # Knowledge base management
+    path('churn/kb/', views.KnowledgeBaseListView.as_view(), name='kb_list'),
+    path('churn/kb/new/', views.KnowledgeBaseCreateView.as_view(), name='kb_create'),
+    path('churn/kb/<int:pk>/', views.KnowledgeBaseDetailView.as_view(), name='kb_detail'),
+    
+    # Report setup and detail
+    path('churn/<int:pk>/report/setup/', views.ReportSetupView.as_view(), name='report_setup'),
+    path('churn/<int:pk>/report/', views.ReportDetailView.as_view(), name='report_detail'),
+    path('churn/<int:pk>/report/churn-all/', views.TriggerFullReportChurnView.as_view(), name='report_churn_all'),
+    
+    # Section views
+    path('churn/section/<int:pk>/', views.SectionDetailView.as_view(), name='section_detail'),
+    path('churn/section/<int:pk>/churn/', views.TriggerSectionChurnView.as_view(), name='section_churn'),
+    path('churn/section/<int:pk>/approve/', views.ApproveSectionView.as_view(), name='section_approve'),
+    
+    # HTMX endpoints for report sections
+    path('churn/section/<int:pk>/status/', views.section_status, name='section_status'),
 ]

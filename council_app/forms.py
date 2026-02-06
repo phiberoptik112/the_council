@@ -1,5 +1,8 @@
 from django import forms
-from .models import Query, ModelConfig, CreativeProject, ChurnIteration
+from .models import (
+    Query, ModelConfig, CreativeProject, ChurnIteration,
+    ReportKnowledgeBase, ReportOutline, ReportSection
+)
 
 
 class QueryForm(forms.ModelForm):
@@ -319,3 +322,143 @@ class TriggerChurnForm(forms.Form):
         if models and len(models) < 2:
             raise forms.ValidationError("Please select at least 2 models for the council.")
         return models
+
+
+# =============================================================================
+# TECHNICAL REPORT REVIEWER FORMS
+# =============================================================================
+
+class ReportKnowledgeBaseForm(forms.ModelForm):
+    """Form for creating/editing a report knowledgebase"""
+    
+    class Meta:
+        model = ReportKnowledgeBase
+        fields = ['name', 'description', 'content']
+        widgets = {
+            'name': forms.TextInput(attrs={
+                'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent',
+                'placeholder': 'e.g., "IEEE Paper Guidelines" or "Company Style Guide"'
+            }),
+            'description': forms.Textarea(attrs={
+                'rows': 3,
+                'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent resize-none',
+                'placeholder': 'Describe what this knowledgebase covers (optional)...'
+            }),
+            'content': forms.Textarea(attrs={
+                'rows': 20,
+                'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent font-mono text-sm',
+                'placeholder': 'Paste your guidelines, templates, or requirements here (markdown supported)...'
+            }),
+        }
+        labels = {
+            'name': 'Knowledge Base Name',
+            'description': 'Description',
+            'content': 'Content (Markdown)',
+        }
+    
+    def clean_name(self):
+        name = self.cleaned_data.get('name', '').strip()
+        if len(name) < 3:
+            raise forms.ValidationError("Please enter a longer name (at least 3 characters).")
+        return name
+    
+    def clean_content(self):
+        content = self.cleaned_data.get('content', '').strip()
+        if len(content) < 20:
+            raise forms.ValidationError("Please enter more content (at least 20 characters).")
+        return content
+
+
+class ReportOutlineForm(forms.Form):
+    """Form for submitting a report outline for parsing"""
+    
+    raw_outline = forms.CharField(
+        widget=forms.Textarea(attrs={
+            'rows': 20,
+            'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent font-mono text-sm',
+            'placeholder': '# Introduction\nBackground information...\n\n## Problem Statement\nDescribe the problem...\n\n# Methodology\nApproach taken...'
+        }),
+        label='Report Outline',
+        help_text='Enter your report outline using markdown headers (# Section, ## Subsection) or numbered lists (1. Section, 1.1 Subsection)'
+    )
+    
+    knowledgebase = forms.ModelChoiceField(
+        queryset=ReportKnowledgeBase.objects.all(),
+        required=False,
+        empty_label='-- No knowledgebase --',
+        widget=forms.Select(attrs={
+            'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent'
+        }),
+        label='Knowledge Base',
+        help_text='Select a knowledgebase to guide the review (optional)'
+    )
+    
+    report_type = forms.ChoiceField(
+        choices=ReportOutline.ReportType.choices,
+        widget=forms.Select(attrs={
+            'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent'
+        }),
+        label='Report Type'
+    )
+    
+    target_audience = forms.CharField(
+        required=False,
+        widget=forms.TextInput(attrs={
+            'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent',
+            'placeholder': 'e.g., "Technical reviewers" or "Executive stakeholders"'
+        }),
+        label='Target Audience',
+        help_text='Who will read this report? (optional)'
+    )
+    
+    processing_mode = forms.ChoiceField(
+        choices=ReportOutline.ProcessingMode.choices,
+        widget=forms.Select(attrs={
+            'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent'
+        }),
+        label='Processing Mode',
+        help_text='Sequential reviews one section at a time; Parallel reviews all sections at once'
+    )
+    
+    def clean_raw_outline(self):
+        outline = self.cleaned_data.get('raw_outline', '').strip()
+        if len(outline) < 20:
+            raise forms.ValidationError("Please enter a more detailed outline (at least 20 characters).")
+        # Check that it has at least one section header
+        import re
+        has_headers = re.search(r'^(#{1,6}\s+.+|\d+[.)]\s+.+)', outline, re.MULTILINE)
+        if not has_headers:
+            raise forms.ValidationError(
+                "Your outline needs at least one section header. "
+                "Use markdown headers (# Section) or numbered lists (1. Section)."
+            )
+        return outline
+
+
+class SectionReviewForm(forms.Form):
+    """Form for user actions on a reviewed section"""
+    
+    ACTION_CHOICES = [
+        ('approve', 'Approve Section'),
+        ('revise', 'Request Revision'),
+        ('edit', 'Edit Manually'),
+    ]
+    
+    action = forms.ChoiceField(
+        choices=ACTION_CHOICES,
+        widget=forms.RadioSelect(attrs={
+            'class': 'h-4 w-4 text-teal-600 focus:ring-teal-500 border-gray-300'
+        }),
+        label='Action'
+    )
+    
+    edited_content = forms.CharField(
+        required=False,
+        widget=forms.Textarea(attrs={
+            'rows': 15,
+            'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent font-mono text-sm',
+            'placeholder': 'Edit the section content here (only used when "Edit Manually" is selected)...'
+        }),
+        label='Edited Content',
+        help_text='Only used when "Edit Manually" is selected'
+    )

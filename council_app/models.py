@@ -219,6 +219,7 @@ class CreativeProject(models.Model):
         STORY = 'story', 'Story'
         ESSAY = 'essay', 'Essay'
         POETRY = 'poetry', 'Poetry'
+        REPORT = 'report', 'Technical Report'
     
     class ProcessingMode(models.TextChoices):
         MANUAL = 'manual', 'Manual (trigger each iteration)'
@@ -228,6 +229,7 @@ class CreativeProject(models.Model):
         EDIT = 'edit', 'Edit & Refine'
         EXPAND = 'expand', 'Expand Outline'
         EXPLORE = 'explore', 'Explore Variations'
+        REPORT = 'report', 'Report Review'
     
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
@@ -411,3 +413,213 @@ class IterationFeedback(models.Model):
     def response_count(self):
         """Number of individual responses that were synthesized"""
         return len(self.raw_responses)
+
+
+# =============================================================================
+# TECHNICAL REPORT REVIEWER MODELS
+# =============================================================================
+
+class ReportKnowledgeBase(models.Model):
+    """
+    A collection of guidelines/templates that inform report structure.
+    Could be: style guides, templates, regulatory requirements, etc.
+    Reusable across multiple report projects.
+    """
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    content = models.TextField(
+        help_text="Knowledge content in markdown format (style guides, templates, requirements)"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-updated_at']
+        verbose_name = 'Report Knowledge Base'
+        verbose_name_plural = 'Report Knowledge Bases'
+    
+    def __str__(self):
+        return self.name
+    
+    def get_relevant_context(self, section_title: str, section_content: str) -> str:
+        """
+        Extract relevant portions of the knowledgebase for a given section.
+        V1: Returns full content.
+        V2: Could use keyword matching or semantic search via ChromaDB.
+        """
+        return self.content
+
+
+class ReportOutline(models.Model):
+    """
+    Structured outline for a technical report.
+    Attaches report-specific data to a CreativeProject via OneToOneField.
+    """
+    
+    class ReportType(models.TextChoices):
+        TECHNICAL = 'technical', 'Technical Report'
+        RESEARCH = 'research', 'Research Paper'
+        PROPOSAL = 'proposal', 'Proposal'
+    
+    class ProcessingMode(models.TextChoices):
+        SEQUENTIAL = 'sequential', 'Sequential (one at a time)'
+        PARALLEL = 'parallel', 'Parallel (all at once)'
+    
+    project = models.OneToOneField(
+        CreativeProject,
+        on_delete=models.CASCADE,
+        related_name='report_outline'
+    )
+    raw_outline = models.TextField(help_text="Original outline as submitted (markdown)")
+    parsed_sections = models.JSONField(
+        default=list,
+        help_text="Parsed sections: [{id, title, content, level, parent_id, order}]"
+    )
+    knowledgebase = models.ForeignKey(
+        ReportKnowledgeBase,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='report_outlines'
+    )
+    report_type = models.CharField(
+        max_length=20,
+        choices=ReportType.choices,
+        default=ReportType.TECHNICAL
+    )
+    target_audience = models.CharField(max_length=200, blank=True)
+    processing_mode = models.CharField(
+        max_length=20,
+        choices=ProcessingMode.choices,
+        default=ProcessingMode.SEQUENTIAL
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-updated_at']
+    
+    def __str__(self):
+        return f"Report Outline for {self.project.title}"
+    
+    def parse_outline(self):
+        """Parse raw_outline markdown into structured sections using OutlineParser."""
+        from .report_churn import OutlineParser
+        parser = OutlineParser()
+        self.parsed_sections = parser.parse(self.raw_outline)
+        self.save()
+        return self.parsed_sections
+    
+    @property
+    def section_count(self):
+        return len(self.parsed_sections)
+    
+    @property
+    def approved_section_count(self):
+        return self.sections.filter(status=ReportSection.Status.APPROVED).count()
+    
+    @property
+    def progress_percent(self):
+        total = self.sections.count()
+        if total == 0:
+            return 0
+        approved = self.sections.filter(status=ReportSection.Status.APPROVED).count()
+        return round((approved / total) * 100)
+
+
+class ReportSection(models.Model):
+    """
+    Tracks per-section iteration state for a technical report.
+    Self-contained with its own feedback/status tracking.
+    """
+    
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        IN_PROGRESS = 'in_progress', 'In Progress'
+        REVIEW = 'review', 'Awaiting Review'
+        APPROVED = 'approved', 'Approved'
+        NEEDS_REVISION = 'needs_revision', 'Needs Revision'
+    
+    report_outline = models.ForeignKey(
+        ReportOutline,
+        on_delete=models.CASCADE,
+        related_name='sections'
+    )
+    section_id = models.CharField(
+        max_length=50,
+        help_text="References parsed_sections[].id"
+    )
+    section_title = models.CharField(max_length=200)
+    order = models.PositiveIntegerField(default=0)
+    
+    # Content tracking
+    original_content = models.TextField(blank=True)
+    current_content = models.TextField(blank=True)
+    content_diff = models.TextField(blank=True)
+    
+    # Knowledge context used for this section
+    knowledge_context = models.TextField(blank=True)
+    
+    # Status and progress
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING
+    )
+    iteration_count = models.PositiveIntegerField(default=0)
+    compliance_score = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Compliance score from 0.0 to 1.0"
+    )
+    
+    # Feedback from the council
+    council_feedback = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Structured feedback from latest review"
+    )
+    raw_responses = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Individual model responses"
+    )
+    
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['order', 'created_at']
+        unique_together = [['report_outline', 'section_id']]
+    
+    def __str__(self):
+        return f"{self.section_title} ({self.get_status_display()})"
+    
+    @property
+    def compliance_percent(self):
+        """Compliance score as a percentage for display."""
+        if self.compliance_score is None:
+            return None
+        return round(self.compliance_score * 100)
+    
+    def mark_in_progress(self):
+        self.status = self.Status.IN_PROGRESS
+        self.save()
+    
+    def mark_review(self):
+        self.status = self.Status.REVIEW
+        self.save()
+    
+    def mark_approved(self):
+        self.status = self.Status.APPROVED
+        self.save()
+    
+    def mark_needs_revision(self):
+        self.status = self.Status.NEEDS_REVISION
+        self.save()
+    
+    def mark_error(self, message: str):
+        self.status = self.Status.PENDING
+        self.error_message = message
+        self.save()

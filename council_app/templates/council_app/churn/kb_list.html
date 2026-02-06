@@ -1,0 +1,74 @@
+{% extends 'council_app/base.html' %}
+
+{% block title %}Knowledge Bases - Report Reviewer{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <a href="{% url 'council_app:churn_list' %}" class="text-teal-600 hover:text-teal-700 text-sm flex items-center">
+                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                </svg>
+                Back to Projects
+            </a>
+            <h1 class="text-3xl font-bold text-gray-900 mt-2">Knowledge Bases</h1>
+            <p class="text-gray-600 mt-1">Manage guidelines and templates for report review</p>
+        </div>
+        <a href="{% url 'council_app:kb_create' %}" 
+           class="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors font-medium">
+            + New Knowledge Base
+        </a>
+    </div>
+    
+    <!-- Knowledge Base List -->
+    {% if knowledgebases %}
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% for kb in knowledgebases %}
+        <a href="{% url 'council_app:kb_detail' pk=kb.id %}" 
+           class="block bg-white rounded-lg shadow-sm p-5 hover:shadow-md transition-shadow border border-gray-100">
+            <h3 class="text-lg font-semibold text-gray-900">{{ kb.name }}</h3>
+            {% if kb.description %}
+            <p class="text-gray-600 text-sm mt-1 line-clamp-2">{{ kb.description }}</p>
+            {% endif %}
+            <div class="flex items-center mt-3 text-xs text-gray-400 space-x-4">
+                <span>{{ kb.content|truncatechars:40 }}</span>
+            </div>
+            <div class="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+                <span class="text-xs text-gray-400">Updated {{ kb.updated_at|timesince }} ago</span>
+                <span class="text-xs text-teal-600 font-medium">
+                    {{ kb.report_outlines.count }} report{{ kb.report_outlines.count|pluralize }}
+                </span>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    
+    {% if is_paginated %}
+    <div class="mt-6 flex justify-center">
+        {% if page_obj.has_previous %}
+        <a href="?page={{ page_obj.previous_page_number }}" class="px-4 py-2 text-sm text-teal-600 hover:text-teal-700">Previous</a>
+        {% endif %}
+        <span class="px-4 py-2 text-sm text-gray-500">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}
+        <a href="?page={{ page_obj.next_page_number }}" class="px-4 py-2 text-sm text-teal-600 hover:text-teal-700">Next</a>
+        {% endif %}
+    </div>
+    {% endif %}
+    
+    {% else %}
+    <div class="bg-white rounded-lg shadow-sm p-12 text-center">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+        </svg>
+        <h3 class="mt-4 text-lg font-medium text-gray-900">No knowledge bases yet</h3>
+        <p class="mt-2 text-gray-500">Create a knowledge base with guidelines and templates to inform report reviews.</p>
+        <a href="{% url 'council_app:kb_create' %}" 
+           class="mt-4 inline-block px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors">
+            Create Your First Knowledge Base
+        </a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

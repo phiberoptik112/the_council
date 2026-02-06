@@ -38,6 +38,7 @@ class ChurnType(Enum):
     EDIT = "edit"           # Line-editing with feedback
     EXPAND = "expand"       # Expand outline to prose
     EXPLORE = "explore"     # Generate variations
+    REPORT = "report"       # Technical report section review
 
 
 @dataclass
