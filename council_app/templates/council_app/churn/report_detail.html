@@ -75,7 +75,7 @@
     <!-- Bulk Actions -->
     {% if pending_sections > 0 or review_sections > 0 %}
     <div class="bg-white rounded-lg shadow-sm p-4 mb-6">
-        <form method="post" action="{% url 'council_app:report_churn_all' pk=project.id %}" class="flex items-center space-x-4">
+        <form method="post" action="{% url 'council_app:report_churn_all' pk=project.id %}" class="flex items-center flex-wrap gap-4">
             {% csrf_token %}
             
             <div class="flex-1">
@@ -100,8 +100,9 @@
             </div>
             
             <button type="submit" 
+                    name="resume"
                     class="px-4 py-2 bg-teal-600 text-white text-sm rounded-lg hover:bg-teal-700 transition-colors font-medium">
-                Start Review
+                {% if pending_sections > 0 %}Resume Report Churn{% else %}Start Review{% endif %}
             </button>
         </form>
     </div>

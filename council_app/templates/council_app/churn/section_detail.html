@@ -38,13 +38,7 @@
          hx-get="{% url 'council_app:section_status' pk=section.id %}"
          hx-trigger="every 3s"
          hx-swap="innerHTML">
-        <div class="flex items-center space-x-3 p-4 bg-blue-50 rounded-lg border border-blue-200 mb-6">
-            <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-            <div>
-                <p class="font-medium text-blue-800">Processing...</p>
-                <p class="text-sm text-blue-600">The council is reviewing this section</p>
-            </div>
-        </div>
+        {% include 'council_app/churn/partials/section_status.html' %}
     </div>
     {% endif %}
     

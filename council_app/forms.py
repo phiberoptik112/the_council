@@ -1,7 +1,7 @@
 from django import forms
 from .models import (
-    Query, ModelConfig, CreativeProject, ChurnIteration,
-    ReportKnowledgeBase, ReportOutline, ReportSection
+    Query, ModelConfig, CreativeProject, ChurnIteration, ChurnConfig,
+    ReportKnowledgeBase, ReportOutline, ReportSection, PDFDocument,
 )
 
 
@@ -324,6 +324,80 @@ class TriggerChurnForm(forms.Form):
         return models
 
 
+class ChurnSettingsForm(forms.ModelForm):
+    """Form for Churn Machine performance settings"""
+
+    class Meta:
+        model = ChurnConfig
+        fields = [
+            'num_predict', 'keep_alive', 'num_ctx',
+            'sequential_models', 'max_content_chars',
+            'max_synthesis_response_chars', 'use_streaming',
+            'debug_full_responses', 'debug_response_max_chars'
+        ]
+        widgets = {
+            'num_predict': forms.NumberInput(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent',
+                'placeholder': 'e.g. 4096 (blank=unlimited)',
+                'min': '256',
+                'max': '32768',
+            }),
+            'keep_alive': forms.TextInput(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent',
+                'placeholder': 'e.g. 5m, 0, or blank',
+            }),
+            'num_ctx': forms.NumberInput(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent',
+                'placeholder': 'e.g. 4096 (blank=model default)',
+            }),
+            'sequential_models': forms.CheckboxInput(attrs={
+                'class': 'h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded',
+            }),
+            'max_content_chars': forms.NumberInput(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent',
+                'placeholder': 'e.g. 8000 (blank=no limit)',
+            }),
+            'max_synthesis_response_chars': forms.NumberInput(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent',
+                'placeholder': 'e.g. 3000',
+            }),
+            'use_streaming': forms.CheckboxInput(attrs={
+                'class': 'h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded',
+            }),
+            'debug_full_responses': forms.CheckboxInput(attrs={
+                'class': 'h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded',
+            }),
+            'debug_response_max_chars': forms.NumberInput(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent',
+                'placeholder': '500',
+                'min': '100',
+                'max': '10000',
+            }),
+        }
+        labels = {
+            'num_predict': 'Max tokens to generate',
+            'keep_alive': 'Model keep-alive',
+            'num_ctx': 'Context window size',
+            'sequential_models': 'Run models sequentially',
+            'max_content_chars': 'Max content length',
+            'max_synthesis_response_chars': 'Max synthesis response length',
+            'use_streaming': 'Use streaming mode',
+            'debug_full_responses': 'Store full model responses',
+            'debug_response_max_chars': 'Max chars per response',
+        }
+        help_texts = {
+            'num_predict': 'Limit output tokens (blank=unlimited). Lower values = faster on slow hardware.',
+            'keep_alive': 'How long to keep models in memory (e.g. 5m, 0). Blank=Ollama default.',
+            'num_ctx': 'Context window in tokens. Blank=model default.',
+            'sequential_models': 'Run one model at a time instead of parallel. Recommended for Raspberry Pi.',
+            'max_content_chars': 'Truncate user content in prompts to this many chars. Blank=no limit.',
+            'max_synthesis_response_chars': 'Truncate each model response in synthesis prompt. Blank=no limit.',
+            'use_streaming': 'Stream from Ollama to avoid 5-minute timeout on long generations.',
+            'debug_full_responses': 'Store full model responses in debug_info for debugging (can be large).',
+            'debug_response_max_chars': 'When full responses disabled, max chars per response in live output.',
+        }
+
+
 # =============================================================================
 # TECHNICAL REPORT REVIEWER FORMS
 # =============================================================================
@@ -433,6 +507,69 @@ class ReportOutlineForm(forms.Form):
                 "Use markdown headers (# Section) or numbered lists (1. Section)."
             )
         return outline
+
+
+# =============================================================================
+# PDF TO MARKDOWN FORMS
+# =============================================================================
+
+class PDFUploadForm(forms.ModelForm):
+    """Form for uploading a PDF document for vision-based markdown extraction"""
+
+    class Meta:
+        model = PDFDocument
+        fields = ['title', 'file', 'model']
+        widgets = {
+            'title': forms.TextInput(attrs={
+                'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent',
+                'placeholder': 'Document title (auto-filled from filename if blank)'
+            }),
+            'file': forms.ClearableFileInput(attrs={
+                'class': 'w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent',
+                'accept': '.pdf',
+            }),
+            'model': forms.Select(attrs={
+                'class': 'w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent'
+            }),
+        }
+        labels = {
+            'title': 'Document Title',
+            'file': 'PDF File',
+            'model': 'Vision Model',
+        }
+        help_texts = {
+            'title': 'Leave blank to auto-fill from the filename.',
+            'file': 'Upload a PDF file to extract as Markdown.',
+            'model': 'Select a vision-capable model (e.g., moondream, minicpm-v). '
+                     'Must already be pulled in Ollama.',
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Only show active models in the dropdown
+        self.fields['model'].queryset = ModelConfig.objects.filter(is_active=True)
+        self.fields['model'].required = False
+        self.fields['title'].required = False
+
+    def clean_file(self):
+        f = self.cleaned_data.get('file')
+        if f:
+            if not f.name.lower().endswith('.pdf'):
+                raise forms.ValidationError("Only PDF files are supported.")
+            # Limit file size to 100MB
+            if f.size > 100 * 1024 * 1024:
+                raise forms.ValidationError("File size must be under 100 MB.")
+        return f
+
+    def clean(self):
+        cleaned = super().clean()
+        # Auto-fill title from filename if not provided
+        if not cleaned.get('title') and cleaned.get('file'):
+            filename = cleaned['file'].name
+            # Strip .pdf extension and clean up
+            title = filename.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ')
+            cleaned['title'] = title.strip()[:200]
+        return cleaned
 
 
 class SectionReviewForm(forms.Form):

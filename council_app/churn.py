@@ -33,6 +33,10 @@ from council import LLMCouncil, ModelResponse
 logger = logging.getLogger('council_app.churn')
 
 
+class ChurnCancelled(Exception):
+    """Raised when the user requests cancellation of an in-progress churn run."""
+
+
 class ChurnType(Enum):
     """Types of churn operations for creative writing"""
     EDIT = "edit"           # Line-editing with feedback
@@ -51,6 +55,7 @@ class ChurnResult:
     raw_responses: List[Dict[str, Any]]
     churn_type: ChurnType
     processing_time: float
+    debug_info: Optional[Dict[str, Any]] = None
 
 
 class ChurnEngine:
@@ -66,20 +71,43 @@ class ChurnEngine:
         self,
         models: List[str],
         ollama_url: str = "http://localhost:11434",
-        timeout: int = 120,  # Longer timeout for creative work
-        retries: int = 2
+        timeout: int = 600,  # 10 minutes - extended timeout for slow models on limited RAM
+        retries: int = 2,
+        num_predict: Optional[int] = None,
+        keep_alive: Optional[str] = None,
+        num_ctx: Optional[int] = None,
+        sequential: bool = False,
+        max_content_chars: Optional[int] = None,
+        max_synthesis_response_chars: Optional[int] = None,
+        use_streaming: bool = False,
+        debug_full_responses: bool = False,
+        debug_response_max_chars: int = 500
     ):
         self.models = models
         self.ollama_url = ollama_url
         self.timeout = timeout
         self.retries = retries
+        self.sequential = sequential
+        self.max_content_chars = max_content_chars
+        self.max_synthesis_response_chars = max_synthesis_response_chars
+        self.debug_full_responses = debug_full_responses
+        self.debug_response_max_chars = debug_response_max_chars
+        # Build options dict for Ollama
+        options = {}
+        if num_predict is not None:
+            options['num_predict'] = num_predict
+        if num_ctx is not None:
+            options['num_ctx'] = num_ctx
         # Use LLMCouncil for model querying
         self.council = LLMCouncil(
             models=models,
             ollama_url=ollama_url,
             timeout=timeout,
             retries=retries,
-            exclude_self_vote=False  # Not voting, so no need to exclude
+            exclude_self_vote=False,  # Not voting, so no need to exclude
+            options=options if options else None,
+            keep_alive=keep_alive,
+            stream=use_streaming
         )
     
     # =========================================================================
@@ -225,8 +253,12 @@ Be creative and bold - the goal is to explore possibilities, not play it safe.""
         Create a prompt for synthesizing multiple model responses into unified feedback.
         """
         responses_text = ""
+        max_chars = self.max_synthesis_response_chars
         for i, resp in enumerate(responses, 1):
-            responses_text += f"\n=== RESPONSE {i} (from {resp['model']}) ===\n{resp['response']}\n"
+            r = resp.get('response') or ''
+            if max_chars and len(r) > max_chars:
+                r = r[:max_chars] + "\n[... truncated ...]"
+            responses_text += f"\n=== RESPONSE {i} (from {resp['model']}) ===\n{r}\n"
         
         if churn_type == ChurnType.EDIT:
             synthesis_instruction = """Synthesize these editorial responses into a single, comprehensive feedback document:
@@ -488,12 +520,15 @@ FINAL SUGGESTED VERSION:
         churn_type: ChurnType,
         context: str = "",
         direction: Optional[str] = None,
-        callback: Optional[callable] = None
+        callback: Optional[callable] = None,
+        cancel_check: Optional[callable] = None
     ) -> ChurnResult:
         """
         Main async method for processing an iteration.
         
         Gathers feedback from all models, synthesizes it, and generates diffs.
+        
+        cancel_check: Optional callable returning bool. If it returns True, raises ChurnCancelled.
         """
         start_time = time.time()
         logger.info(f"=== Starting churn processing (type: {churn_type.value}) ===")
@@ -501,10 +536,20 @@ FINAL SUGGESTED VERSION:
         logger.debug(f"Models to query: {self.models}")
         logger.debug(f"Ollama URL: {self.ollama_url}, Timeout: {self.timeout}s")
         
+        def _check_cancel():
+            if cancel_check and cancel_check():
+                raise ChurnCancelled("Cancelled by user")
+        
         # Stage 1: Create the appropriate prompt
         logger.info("Stage 1: Creating prompt")
+        _check_cancel()
         if callback:
             callback(None, "creating_prompt", churn_type)
+        
+        # Truncate content if configured for performance
+        if self.max_content_chars and len(content) > self.max_content_chars:
+            content = content[:self.max_content_chars] + "\n\n[... content truncated for performance ...]"
+            logger.info(f"Truncated content to {self.max_content_chars} chars for prompt")
         
         if churn_type == ChurnType.EDIT:
             prompt = self.create_edit_prompt(content, context)
@@ -514,34 +559,187 @@ FINAL SUGGESTED VERSION:
             prompt = self.create_explore_prompt(content, direction, context)
         
         logger.debug(f"Created prompt ({len(prompt)} chars)")
+        _check_cancel()
         
         # Stage 2: Gather responses from all models
         logger.info("Stage 2: Gathering responses from all models")
         if callback:
             callback(None, "gathering", None)
         
-        responses = await self.council.get_all_responses_async(prompt, callback)
+        responses = await self.council.get_all_responses_async(prompt, callback, sequential=self.sequential)
+        _check_cancel()
         
-        logger.info(f"Received {len(responses) if responses else 0} valid responses")
+        logger.info(f"Received {len(responses) if responses else 0} responses from models")
         for r in (responses or []):
             logger.debug(f"  - {r.model}: {'OK' if not r.error else f'ERROR: {r.error}'} ({r.response_time:.1f}s)")
         
-        if not responses:
-            logger.error("No valid responses received from any model!")
-            raise ValueError("No valid responses received from any model")
+        # Store all original responses for debug info BEFORE filtering
+        all_responses_for_debug = list(responses) if responses else []
         
-        # Convert to dict format for storage
-        raw_responses = [
-            {
-                'model': r.model,
-                'response': r.response,
-                'response_time': r.response_time
+        # Filter out empty responses before validation (additional safety check)
+        non_empty_responses = [r for r in responses if r.response and r.response.strip()] if responses else []
+        empty_responses_filtered = []
+        if len(non_empty_responses) < len(responses) if responses else 0:
+            empty_count = len(responses) - len(non_empty_responses) if responses else 0
+            empty_responses_filtered = [r for r in responses if not (r.response and r.response.strip())]
+            logger.warning(f"{empty_count} empty response(s) filtered out before validation")
+            responses = non_empty_responses
+        
+        # Stage 2.5: Validate responses
+        logger.info("Stage 2.5: Validating responses")
+        _check_cancel()
+        if callback:
+            callback(None, "validating", None)
+        
+        # Validate responses if we have any
+        valid_responses = []
+        flagged_responses = []
+        validation_details = {}
+        
+        if responses:
+            valid_responses, flagged_responses, validation_details = self.council.validate_responses(
+                responses, prompt
+            )
+            logger.info(
+                f"Validation complete: {len(valid_responses)} valid, {len(flagged_responses)} flagged "
+                f"out of {len(responses)} total"
+            )
+        
+        # Use validated responses for synthesis (or all if fallback)
+        # Before falling back, verify responses contain actual content
+        responses_to_use = valid_responses if valid_responses else responses
+        
+        # Additional check: ensure responses_to_use have content
+        if responses_to_use:
+            responses_with_content = [r for r in responses_to_use if r.response and r.response.strip()]
+            if len(responses_with_content) < len(responses_to_use):
+                empty_in_fallback = len(responses_to_use) - len(responses_with_content)
+                logger.warning(f"Fallback responses contain {empty_in_fallback} empty response(s), filtering them out")
+                responses_to_use = responses_with_content
+        
+        if not responses_to_use:
+            # Build detailed error message
+            error_parts = [f"No valid responses received from any model"]
+            
+            if responses:
+                error_parts.append(f"({len(responses)} responses received, {len(valid_responses)} passed validation)")
+                
+                # Check for empty responses
+                empty_responses = [r for r in responses if not (r.response and r.response.strip())]
+                if empty_responses:
+                    error_parts.append(f"\nEmpty responses ({len(empty_responses)}):")
+                    for resp in empty_responses:
+                        error_parts.append(f"  - {resp.model}: Empty or whitespace-only response")
+                
+                # Add validation failure details
+                failure_details = []
+                for resp in responses:
+                    # Skip empty responses (already reported)
+                    if not (resp.response and resp.response.strip()):
+                        continue
+                    
+                    validation_result = validation_details.get(resp.model, {})
+                    if not validation_result.get('is_valid', True):
+                        reasons = validation_result.get('reasons', ['Unknown validation failure'])
+                        preview = resp.response[:200] if resp.response else "No response"
+                        response_length = len(resp.response) if resp.response else 0
+                        failure_details.append(
+                            f"  - {resp.model}: {'; '.join(reasons)} ({response_length} chars, preview: {preview}...)"
+                        )
+                
+                if failure_details:
+                    error_parts.append("\nValidation failures:")
+                    error_parts.extend(failure_details)
+            else:
+                error_parts.append("(no responses received from any model)")
+            
+            error_message = "\n".join(error_parts)
+            logger.error(error_message)
+            
+            # Build debug info structure with enhanced information
+            max_chars = None if self.debug_full_responses else self.debug_response_max_chars
+            debug_info = {
+                "models_queried": self.models,
+                "responses": [
+                    {
+                        "model": r.model,
+                        "response": (r.response[:max_chars] if max_chars and r.response else r.response) if r.response else None,
+                        "response_length": len(r.response) if r.response else 0,
+                        "response_time": r.response_time,
+                        "error": r.error,
+                        "is_empty": not (r.response and r.response.strip()),
+                        "validation": validation_details.get(r.model, {})
+                    }
+                    for r in all_responses_for_debug
+                ],
+                "validation_summary": {
+                    "total_responses": len(all_responses_for_debug),
+                    "empty_responses_filtered": len(empty_responses_filtered),
+                    "non_empty_responses": len(responses) if responses else 0,
+                    "valid_count": len(valid_responses),
+                    "flagged_count": len(flagged_responses)
+                },
+                "error_details": error_message
             }
-            for r in responses
-        ]
+            
+            # Attach debug_info to exception for task to capture
+            exc = ValueError(error_message)
+            exc.debug_info = debug_info
+            raise exc
+        
+        # Convert validated responses to dict format for storage
+        # Validate that each response has content before storing
+        raw_responses = []
+        for r in responses_to_use:
+            if r.response and r.response.strip():
+                raw_responses.append({
+                    'model': r.model,
+                    'response': r.response,
+                    'response_time': r.response_time
+                })
+            else:
+                logger.warning(f"Skipping empty response from {r.model} when building raw_responses")
+                # Still add to debug_info but mark as empty
+                debug_info.setdefault('empty_responses_in_storage', []).append({
+                    'model': r.model,
+                    'response_time': r.response_time,
+                    'reason': 'Empty or whitespace-only response'
+                })
+        
+        if not raw_responses:
+            error_msg = "No responses with content available for storage"
+            logger.error(error_msg)
+            debug_info['storage_error'] = error_msg
+            raise ValueError(error_msg)
+        
+        # Build debug info structure (for successful runs, store enhanced info)
+        max_chars = None if self.debug_full_responses else self.debug_response_max_chars
+        debug_info = {
+            "models_queried": self.models,
+            "responses": [
+                {
+                    "model": r.model,
+                    "response": (r.response[:max_chars] if max_chars and r.response else r.response) if r.response else None,
+                    "response_length": len(r.response) if r.response else 0,
+                    "response_time": r.response_time,
+                    "error": r.error,
+                    "is_empty": not (r.response and r.response.strip()),
+                    "validation": validation_details.get(r.model, {})
+                }
+                for r in all_responses_for_debug
+            ],
+            "validation_summary": {
+                "total_responses": len(all_responses_for_debug),
+                "empty_responses_filtered": len(empty_responses_filtered),
+                "non_empty_responses": len(responses) if responses else 0,
+                "valid_count": len(valid_responses),
+                "flagged_count": len(flagged_responses)
+            }
+        }
         
         # Stage 3: Synthesize responses
         logger.info("Stage 3: Synthesizing responses")
+        _check_cancel()
         if callback:
             callback(None, "synthesizing", None)
         
@@ -558,9 +756,18 @@ FINAL SUGGESTED VERSION:
         
         if synthesis_response.error:
             logger.error(f"Synthesis failed with error: {synthesis_response.error}")
+            # Store synthesis error in debug info
+            debug_info['synthesis_error'] = synthesis_response.error
             raise ValueError(f"Synthesis failed: {synthesis_response.error}")
         
+        # Check if synthesis response is empty
+        if not synthesis_response.response or not synthesis_response.response.strip():
+            logger.error("Synthesis model returned empty response")
+            debug_info['synthesis_error'] = "Synthesis model returned empty response"
+            raise ValueError("Synthesis model returned empty response")
+        
         logger.debug(f"Synthesis response received ({len(synthesis_response.response)} chars)")
+        _check_cancel()
         
         # Stage 4: Parse synthesis and extract suggested content
         logger.info("Stage 4: Parsing synthesis response")
@@ -574,23 +781,102 @@ FINAL SUGGESTED VERSION:
         logger.debug(f"Parsed feedback: {len(synthesized_feedback)} chars")
         logger.debug(f"Parsed suggested content: {len(suggested_content)} chars")
         
-        # If no suggested content from synthesis, try to extract from individual responses
-        if not suggested_content:
-            logger.warning("No suggested content from synthesis, extracting from individual responses")
-            if churn_type == ChurnType.EDIT:
-                # Try to get revised version from first response
-                parsed = self.parse_edit_response(responses[0].response)
-                suggested_content = parsed.get('revised_version', content)
-            elif churn_type == ChurnType.EXPAND:
-                suggested_content = self.parse_expand_response(responses[0].response)
-            else:  # EXPLORE
-                variations = self.parse_explore_response(responses[0].response)
-                if variations:
-                    suggested_content = variations[0].get('sample', content)
-            logger.debug(f"Extracted suggested content: {len(suggested_content)} chars")
+        # Enhanced fallback strategies if no suggested content from synthesis
+        if not suggested_content or not suggested_content.strip():
+            logger.warning("No suggested content from synthesis parsing, trying fallback strategies")
+            fallback_success = False
+            
+            # Strategy 1: Try extracting from synthesis response directly (use whole response as content)
+            if synthesis_response.response and synthesis_response.response.strip():
+                logger.debug("Fallback strategy 1: Using synthesis response directly")
+                # Try to find content after any markers
+                direct_content = synthesis_response.response.strip()
+                # Remove common prefixes if present
+                for prefix in ['FINAL SUGGESTED VERSION:', 'SUGGESTED VERSION:', 'REVISED VERSION:']:
+                    if prefix.lower() in direct_content.lower():
+                        parts = direct_content.split(prefix, 1)
+                        if len(parts) > 1:
+                            direct_content = parts[1].strip()
+                            break
+                
+                if direct_content and len(direct_content) > 50:  # Minimum reasonable length
+                    suggested_content = direct_content
+                    fallback_success = True
+                    logger.info("Fallback strategy 1 succeeded: extracted from synthesis response directly")
+            
+            # Strategy 2: Try parsing from individual responses
+            if not fallback_success and responses_to_use:
+                logger.debug("Fallback strategy 2: Extracting from individual responses")
+                for resp in responses_to_use:
+                    if not (resp.response and resp.response.strip()):
+                        continue
+                    
+                    try:
+                        if churn_type == ChurnType.EDIT:
+                            parsed = self.parse_edit_response(resp.response)
+                            extracted = parsed.get('revised_version', '')
+                            if extracted and extracted.strip() and len(extracted.strip()) > 50:
+                                suggested_content = extracted
+                                fallback_success = True
+                                logger.info(f"Fallback strategy 2 succeeded: extracted from {resp.model} response")
+                                break
+                        elif churn_type == ChurnType.EXPAND:
+                            extracted = self.parse_expand_response(resp.response)
+                            if extracted and extracted.strip() and len(extracted.strip()) > 50:
+                                suggested_content = extracted
+                                fallback_success = True
+                                logger.info(f"Fallback strategy 2 succeeded: extracted from {resp.model} response")
+                                break
+                        else:  # EXPLORE
+                            variations = self.parse_explore_response(resp.response)
+                            if variations:
+                                extracted = variations[0].get('sample', '')
+                                if extracted and extracted.strip() and len(extracted.strip()) > 50:
+                                    suggested_content = extracted
+                                    fallback_success = True
+                                    logger.info(f"Fallback strategy 2 succeeded: extracted from {resp.model} response")
+                                    break
+                    except Exception as e:
+                        logger.warning(f"Error parsing response from {resp.model}: {e}")
+                        continue
+            
+            # Strategy 3: Use original content as last resort (with warning)
+            if not fallback_success:
+                logger.warning("All fallback strategies failed, using original content as last resort")
+                suggested_content = content
+                synthesized_feedback = (
+                    synthesized_feedback + 
+                    "\n\n[WARNING: Could not extract suggested content from synthesis or individual responses. "
+                    "Using original content as fallback.]"
+                )
+                debug_info['synthesis_fallback_used'] = True
+                debug_info['synthesis_fallback_reason'] = "All extraction strategies failed"
+            else:
+                logger.debug(f"Fallback extraction succeeded: {len(suggested_content)} chars")
+        
+        # Final validation: ensure suggested_content is not empty
+        if not suggested_content or not suggested_content.strip():
+            error_msg = "Could not extract any suggested content from synthesis or fallback strategies"
+            logger.error(error_msg)
+            debug_info['synthesis_error'] = error_msg
+            debug_info['synthesis_response_preview'] = synthesis_response.response[:500] if synthesis_response.response else None
+            debug_info['synthesis_response_length'] = len(synthesis_response.response) if synthesis_response.response else 0
+            raise ValueError(error_msg)
+        
+        # Add synthesis information to debug_info
+        debug_info['synthesis'] = {
+            "model": self.models[0],
+            "response_length": len(synthesis_response.response) if synthesis_response.response else 0,
+            "response_time": synthesis_response.response_time,
+            "parsed_feedback_length": len(synthesized_feedback),
+            "parsed_content_length": len(suggested_content),
+            "fallback_used": debug_info.get('synthesis_fallback_used', False),
+            "fallback_reason": debug_info.get('synthesis_fallback_reason')
+        }
         
         # Stage 5: Generate diff
         logger.info("Stage 5: Generating diff")
+        _check_cancel()
         if callback:
             callback(None, "generating_diff", None)
         
@@ -611,7 +897,8 @@ FINAL SUGGESTED VERSION:
             content_diff=content_diff,
             raw_responses=raw_responses,
             churn_type=churn_type,
-            processing_time=processing_time
+            processing_time=processing_time,
+            debug_info=debug_info
         )
     
     def process_iteration(
@@ -688,7 +975,7 @@ if __name__ == "__main__":
     # Example usage
     engine = ChurnEngine(
         models=["phi3:mini", "tinyllama"],
-        timeout=120
+        timeout=600  # 10 minutes - extended timeout for slow models
     )
     
     sample_content = """

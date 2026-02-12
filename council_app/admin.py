@@ -1,8 +1,9 @@
 from django.contrib import admin
 from .models import (
     ModelConfig, Query, Response, Vote, QueryTag,
-    CreativeProject, ChurnIteration, IterationFeedback,
-    ReportKnowledgeBase, ReportOutline, ReportSection
+    CreativeProject, ChurnIteration, IterationFeedback, ChurnConfig,
+    ReportKnowledgeBase, ReportOutline, ReportSection,
+    PDFDocument, PDFPage,
 )
 
 
@@ -84,6 +85,11 @@ class IterationFeedbackAdmin(admin.ModelAdmin):
     search_fields = ['synthesized_feedback']
 
 
+@admin.register(ChurnConfig)
+class ChurnConfigAdmin(admin.ModelAdmin):
+    list_display = ['id', 'num_predict', 'keep_alive', 'num_ctx', 'sequential_models', 'max_content_chars', 'max_synthesis_response_chars', 'use_streaming', 'updated_at']
+
+
 # =============================================================================
 # TECHNICAL REPORT REVIEWER ADMIN
 # =============================================================================
@@ -119,3 +125,23 @@ class ReportSectionAdmin(admin.ModelAdmin):
     def report_project(self, obj):
         return obj.report_outline.project.title
     report_project.short_description = 'Project'
+
+
+# =============================================================================
+# PDF TO MARKDOWN ADMIN
+# =============================================================================
+
+@admin.register(PDFDocument)
+class PDFDocumentAdmin(admin.ModelAdmin):
+    list_display = ['title', 'status', 'total_pages', 'processed_pages', 'model', 'created_at']
+    list_filter = ['status', 'model']
+    search_fields = ['title']
+    date_hierarchy = 'created_at'
+    raw_id_fields = ['model']
+
+
+@admin.register(PDFPage)
+class PDFPageAdmin(admin.ModelAdmin):
+    list_display = ['document', 'page_number', 'status', 'processing_time', 'created_at']
+    list_filter = ['status', 'document']
+    raw_id_fields = ['document']

@@ -12,14 +12,16 @@ from django.urls import reverse
 
 from .models import (
     Query, Response, Vote, ModelConfig, QueryTag, QueryEvent,
-    CreativeProject, ChurnIteration, IterationFeedback,
-    ReportKnowledgeBase, ReportOutline, ReportSection
+    CreativeProject, ChurnIteration, IterationFeedback, ChurnConfig,
+    ReportKnowledgeBase, ReportOutline, ReportSection,
+    PDFDocument, PDFPage,
 )
 from .forms import (
     QueryForm, ModelConfigForm, AddModelForm,
     CreativeProjectForm, SubmitContentForm, BranchForm,
-    BatchChurnForm, TriggerChurnForm,
-    ReportKnowledgeBaseForm, ReportOutlineForm, SectionReviewForm
+    BatchChurnForm, TriggerChurnForm, ChurnSettingsForm,
+    ReportKnowledgeBaseForm, ReportOutlineForm, SectionReviewForm,
+    PDFUploadForm,
 )
 from .utils import get_system_info
 
@@ -157,14 +159,31 @@ def query_events_stream(request, pk):
     
     Streams query events as they occur, allowing the frontend to show
     real-time progress without polling.
+    
+    Includes a maximum stream lifetime (10 minutes) to prevent stale
+    connections from accumulating when clients disconnect unexpectedly
+    (e.g. laptop going to sleep).
     """
+    MAX_STREAM_SECONDS = 600  # 10 minutes maximum stream lifetime
+
     def event_stream():
         last_event_id = 0
         heartbeat_interval = 15  # seconds
         last_heartbeat = time.time()
+        stream_start = time.time()
         
         while True:
             try:
+                # Check if the stream has exceeded its maximum lifetime
+                if time.time() - stream_start > MAX_STREAM_SECONDS:
+                    timeout_data = {
+                        'type': 'stream_end',
+                        'status': 'timeout',
+                        'error_message': 'Stream timed out. Refresh the page to reconnect.'
+                    }
+                    yield f"data: {json.dumps(timeout_data)}\n\n"
+                    break
+
                 # Get the query
                 query = Query.objects.get(pk=pk)
                 
@@ -475,7 +494,13 @@ class ProjectDetailView(DetailView):
         context['root_iteration'] = project.root_iteration
         context['all_iterations'] = project.iterations.select_related('parent').prefetch_related('children', 'feedback')
         context['iteration_tree'] = project.get_iteration_tree()
-        context['latest_iteration'] = project.latest_iteration
+        latest_iteration = project.latest_iteration
+        context['latest_iteration'] = latest_iteration
+        context['latest_iteration_has_feedback'] = (
+            latest_iteration
+            and latest_iteration.status == 'complete'
+            and IterationFeedback.objects.filter(iteration=latest_iteration).exists()
+        )
         
         # Get branch form for quick branching
         context['branch_form'] = BranchForm()
@@ -483,6 +508,31 @@ class ProjectDetailView(DetailView):
         context['batch_form'] = BatchChurnForm()
         
         return context
+
+
+class ChurnSettingsView(View):
+    """View for Churn Machine performance settings"""
+    template_name = 'council_app/churn/churn_settings.html'
+
+    def get(self, request):
+        config = ChurnConfig.get_instance()
+        form = ChurnSettingsForm(instance=config)
+        return render(request, self.template_name, {
+            'form': form,
+            'config': config,
+        })
+
+    def post(self, request):
+        config = ChurnConfig.get_instance()
+        form = ChurnSettingsForm(request.POST, instance=config)
+        if form.is_valid():
+            form.save()
+            messages.success(request, 'Churn settings saved successfully.')
+            return redirect('council_app:churn_list')
+        return render(request, self.template_name, {
+            'form': form,
+            'config': config,
+        })
 
 
 class IterationDetailView(DetailView):
@@ -498,6 +548,7 @@ class IterationDetailView(DetailView):
         # Get parent for comparison
         context['parent'] = iteration.parent
         context['branch_path'] = iteration.get_branch_path()
+        context['root_iteration'] = iteration.get_branch_path()[0] if iteration.get_branch_path() else None
         context['siblings'] = iteration.get_siblings()
         context['children'] = iteration.children.all()
         
@@ -512,10 +563,17 @@ class IterationDetailView(DetailView):
         context['trigger_form'] = TriggerChurnForm(initial={
             'churn_type': iteration.project.default_churn_type
         })
+        context['batch_form'] = BatchChurnForm(initial={
+            'churn_type': iteration.project.default_churn_type
+        })
         
         # Parse diff for display
         if iteration.content_diff:
             context['diff_lines'] = parse_diff_for_display(iteration.content_diff)
+        
+        # Add debug info if available
+        if iteration.debug_info:
+            context['debug_info'] = iteration.debug_info
         
         return context
 
@@ -631,6 +689,77 @@ class TriggerChurnView(View):
         return redirect('council_app:churn_iteration', pk=pk)
 
 
+class RetryIterationView(View):
+    """Retry a failed iteration"""
+    
+    def post(self, request, pk):
+        iteration = get_object_or_404(ChurnIteration, pk=pk)
+        
+        # Only allow retry on error status
+        if iteration.status != ChurnIteration.Status.ERROR:
+            messages.error(request, 'Can only retry failed iterations.')
+            return redirect('council_app:churn_iteration', pk=pk)
+        
+        # Optional: Allow model selection override
+        models = request.POST.getlist('models')
+        if models:
+            # Validate models exist and are active
+            model_objs = ModelConfig.objects.filter(pk__in=models, is_active=True)
+            if model_objs.count() < 2:
+                messages.error(request, 'Please select at least 2 active models for the retry.')
+                return redirect('council_app:churn_iteration', pk=pk)
+            iteration.models_used.set(model_objs)
+        else:
+            # Use existing models
+            if iteration.models_used.filter(is_active=True).count() < 2:
+                messages.error(request, 'Please select at least 2 active models for the retry.')
+                return redirect('council_app:churn_iteration', pk=pk)
+        
+        # Reset iteration state
+        iteration.status = ChurnIteration.Status.PENDING
+        iteration.error_message = ''
+        iteration.completed_at = None  # Clear completion timestamp if exists
+        iteration.cancel_requested = False
+        iteration.save()
+        
+        # Delete incomplete feedback if exists
+        try:
+            iteration.feedback.delete()
+        except IterationFeedback.DoesNotExist:
+            pass
+        
+        # Requeue task
+        from django_q.tasks import async_task
+        model_ids = list(iteration.models_used.values_list('id', flat=True))
+        async_task(
+            'council_app.tasks.run_churn_iteration',
+            iteration.id,
+            model_ids,
+            '',  # context
+            task_name=f'churn_iteration_{iteration.id}_retry'
+        )
+        
+        messages.success(request, 'Iteration retry queued! The council will reprocess this iteration.')
+        return redirect('council_app:churn_iteration', pk=pk)
+
+
+class StopChurnView(View):
+    """Request cancellation of an in-progress churn iteration."""
+    
+    def post(self, request, pk):
+        iteration = get_object_or_404(ChurnIteration, pk=pk)
+        
+        if iteration.status != ChurnIteration.Status.PROCESSING:
+            messages.warning(request, 'Iteration is not processing. Nothing to stop.')
+            return redirect('council_app:churn_iteration', pk=pk)
+        
+        iteration.cancel_requested = True
+        iteration.save(update_fields=['cancel_requested'])
+        
+        messages.success(request, 'Stop requested. The iteration will stop at the next stage boundary.')
+        return redirect('council_app:churn_iteration', pk=pk)
+
+
 class BranchView(View):
     """Create a branch from an iteration"""
     
@@ -714,9 +843,13 @@ class CompareView(TemplateView):
 def iteration_status(request, pk):
     """HTMX endpoint for polling iteration status"""
     iteration = get_object_or_404(ChurnIteration, pk=pk)
-    return render(request, 'council_app/churn/partials/iteration_status.html', {
+    context = {
         'iteration': iteration
-    })
+    }
+    # Add debug_info if available
+    if iteration.debug_info:
+        context['debug_info'] = iteration.debug_info
+    return render(request, 'council_app/churn/partials/iteration_status.html', context)
 
 
 def parse_diff_for_display(diff_text):
@@ -984,6 +1117,10 @@ class SectionDetailView(DetailView):
         if section.content_diff:
             context['diff_lines'] = parse_diff_for_display(section.content_diff)
         
+        # Debug info for live output display during processing
+        if section.debug_info:
+            context['debug_info'] = section.debug_info
+        
         # Get feedback details from JSON
         feedback = section.council_feedback or {}
         context['synthesized_feedback'] = feedback.get('synthesized_feedback', '')
@@ -1021,6 +1158,23 @@ class TriggerSectionChurnView(View):
         )
         
         messages.success(request, f'Section "{section.section_title}" submitted for review!')
+        return redirect('council_app:section_detail', pk=pk)
+
+
+class StopSectionChurnView(View):
+    """Request cancellation of an in-progress report section churn."""
+    
+    def post(self, request, pk):
+        section = get_object_or_404(ReportSection, pk=pk)
+        
+        if section.status != ReportSection.Status.IN_PROGRESS:
+            messages.warning(request, 'Section is not in progress. Nothing to stop.')
+            return redirect('council_app:section_detail', pk=pk)
+        
+        section.cancel_requested = True
+        section.save(update_fields=['cancel_requested'])
+        
+        messages.success(request, 'Stop requested. The section will stop at the next stage boundary.')
         return redirect('council_app:section_detail', pk=pk)
 
 
@@ -1097,8 +1251,176 @@ class ApproveSectionView(View):
 def section_status(request, pk):
     """HTMX endpoint for polling section processing status"""
     section = get_object_or_404(ReportSection, pk=pk)
-    return render(request, 'council_app/churn/partials/section_status.html', {
-        'section': section
-    })
+    context = {'section': section}
+    if section.debug_info:
+        context['debug_info'] = section.debug_info
+    return render(request, 'council_app/churn/partials/section_status.html', context)
+
+
+# =============================================================================
+# PDF TO MARKDOWN VIEWS
+# =============================================================================
+
+class PDFListView(ListView):
+    """List all uploaded PDF documents"""
+    model = PDFDocument
+    template_name = 'council_app/churn/pdf_list.html'
+    context_object_name = 'documents'
+    paginate_by = 12
+
+
+class PDFUploadView(TemplateView):
+    """Upload a new PDF for markdown extraction"""
+    template_name = 'council_app/churn/pdf_upload.html'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['form'] = PDFUploadForm()
+        return context
+
+    def post(self, request):
+        form = PDFUploadForm(request.POST, request.FILES)
+        if form.is_valid():
+            document = form.save()
+
+            # Get page count immediately so we can show it
+            try:
+                from .pdf_processor import PDFPageProcessor
+                total_pages = PDFPageProcessor.extract_page_count(document.file.path)
+                document.total_pages = total_pages
+                document.save(update_fields=['total_pages'])
+            except Exception as e:
+                document.total_pages = 0
+                document.save(update_fields=['total_pages'])
+
+            messages.success(
+                request,
+                f'PDF "{document.title}" uploaded ({document.total_pages} pages). '
+                f'Click "Start Processing" to begin extraction.'
+            )
+            return redirect('council_app:pdf_detail', pk=document.id)
+
+        return render(request, self.template_name, {'form': form})
+
+
+class PDFDetailView(DetailView):
+    """View a PDF document with its pages and processing status"""
+    model = PDFDocument
+    template_name = 'council_app/churn/pdf_detail.html'
+    context_object_name = 'document'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        document = self.object
+        context['pages'] = document.pages.all().order_by('page_number')
+        context['complete_pages'] = document.pages.filter(
+            status=PDFPage.Status.COMPLETE
+        ).count()
+        context['error_pages'] = document.pages.filter(
+            status=PDFPage.Status.ERROR
+        ).count()
+        context['models'] = ModelConfig.objects.filter(is_active=True)
+        return context
+
+
+class PDFProcessView(View):
+    """Trigger PDF processing as a background task"""
+
+    def post(self, request, pk):
+        document = get_object_or_404(PDFDocument, pk=pk)
+
+        if document.status == PDFDocument.Status.PROCESSING:
+            messages.warning(request, 'This document is already being processed.')
+            return redirect('council_app:pdf_detail', pk=pk)
+
+        # Reset status for reprocessing
+        document.status = PDFDocument.Status.PENDING
+        document.error_message = ''
+        document.processed_pages = 0
+        document.save(update_fields=['status', 'error_message', 'processed_pages'])
+
+        # Reset page statuses
+        document.pages.all().update(
+            status=PDFPage.Status.PENDING,
+            error_message='',
+            extracted_markdown='',
+            processing_time=None,
+        )
+
+        # Queue the background task
+        from django_q.tasks import async_task
+        async_task(
+            'council_app.tasks.process_pdf_document',
+            document.id,
+            task_name=f'pdf_process_{document.id}'
+        )
+
+        messages.success(
+            request,
+            f'Processing started for "{document.title}" ({document.total_pages} pages). '
+            f'This may take a while on Raspberry Pi.'
+        )
+        return redirect('council_app:pdf_detail', pk=pk)
+
+
+class PDFPageDetailView(DetailView):
+    """View a single extracted page's markdown"""
+    model = PDFPage
+    template_name = 'council_app/churn/pdf_page_detail.html'
+    context_object_name = 'page'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        page = self.object
+        document = page.document
+        context['document'] = document
+
+        # Navigation: prev/next pages
+        all_pages = list(document.pages.order_by('page_number'))
+        current_idx = next(
+            (i for i, p in enumerate(all_pages) if p.pk == page.pk), 0
+        )
+        context['prev_page'] = all_pages[current_idx - 1] if current_idx > 0 else None
+        context['next_page'] = (
+            all_pages[current_idx + 1]
+            if current_idx < len(all_pages) - 1
+            else None
+        )
+        return context
+
+
+class PDFDeleteView(View):
+    """Delete a PDF document and its ChromaDB collection"""
+
+    def post(self, request, pk):
+        document = get_object_or_404(PDFDocument, pk=pk)
+        title = document.title
+
+        # Clean up ChromaDB collection
+        if document.chromadb_collection:
+            try:
+                from . import vector_store
+                vector_store.delete_collection(document.chromadb_collection)
+            except Exception:
+                pass  # Non-critical; collection may not exist
+
+        # Delete the file and DB record
+        document.file.delete(save=False)
+        document.delete()
+
+        messages.success(request, f'PDF "{title}" deleted.')
+        return redirect('council_app:pdf_list')
+
+
+def pdf_status(request, pk):
+    """HTMX endpoint for polling PDF processing status"""
+    document = get_object_or_404(PDFDocument, pk=pk)
+    context = {
+        'document': document,
+        'pages': document.pages.all().order_by('page_number'),
+        'complete_pages': document.pages.filter(status=PDFPage.Status.COMPLETE).count(),
+        'error_pages': document.pages.filter(status=PDFPage.Status.ERROR).count(),
+    }
+    return render(request, 'council_app/churn/partials/pdf_status.html', context)
 
 

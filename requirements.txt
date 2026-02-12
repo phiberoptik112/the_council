@@ -16,5 +16,16 @@ requests>=2.31
 # System info
 psutil>=5.9
 
+# Production WSGI server
+gunicorn>=21.2
+whitenoise>=6.5
+
+# PDF processing
+PyMuPDF>=1.24
+Pillow>=10.0
+
+# Vector database
+chromadb>=0.4
+
 # Development
 python-dotenv>=1.0

@@ -30,6 +30,7 @@ urlpatterns = [
     
     # Project management
     path('churn/', views.ChurnProjectListView.as_view(), name='churn_list'),
+    path('churn/settings/', views.ChurnSettingsView.as_view(), name='churn_settings'),
     path('churn/new/', views.CreateProjectView.as_view(), name='churn_create'),
     path('churn/<int:pk>/', views.ProjectDetailView.as_view(), name='churn_project'),
     path('churn/<int:pk>/submit/', views.SubmitIterationView.as_view(), name='churn_submit'),
@@ -37,6 +38,8 @@ urlpatterns = [
     # Iteration views
     path('churn/iteration/<int:pk>/', views.IterationDetailView.as_view(), name='churn_iteration'),
     path('churn/iteration/<int:pk>/churn/', views.TriggerChurnView.as_view(), name='trigger_churn'),
+    path('churn/iteration/<int:pk>/retry/', views.RetryIterationView.as_view(), name='retry_iteration'),
+    path('churn/iteration/<int:pk>/stop/', views.StopChurnView.as_view(), name='stop_churn'),
     path('churn/iteration/<int:pk>/branch/', views.BranchView.as_view(), name='churn_branch'),
     path('churn/iteration/<int:pk>/batch/', views.BatchChurnView.as_view(), name='batch_churn'),
     
@@ -63,8 +66,23 @@ urlpatterns = [
     # Section views
     path('churn/section/<int:pk>/', views.SectionDetailView.as_view(), name='section_detail'),
     path('churn/section/<int:pk>/churn/', views.TriggerSectionChurnView.as_view(), name='section_churn'),
+    path('churn/section/<int:pk>/stop/', views.StopSectionChurnView.as_view(), name='stop_section_churn'),
     path('churn/section/<int:pk>/approve/', views.ApproveSectionView.as_view(), name='section_approve'),
     
     # HTMX endpoints for report sections
     path('churn/section/<int:pk>/status/', views.section_status, name='section_status'),
+
+    # ==========================================================================
+    # PDF TO MARKDOWN URLs
+    # ==========================================================================
+
+    path('churn/pdf/', views.PDFListView.as_view(), name='pdf_list'),
+    path('churn/pdf/upload/', views.PDFUploadView.as_view(), name='pdf_upload'),
+    path('churn/pdf/<int:pk>/', views.PDFDetailView.as_view(), name='pdf_detail'),
+    path('churn/pdf/<int:pk>/process/', views.PDFProcessView.as_view(), name='pdf_process'),
+    path('churn/pdf/<int:pk>/delete/', views.PDFDeleteView.as_view(), name='pdf_delete'),
+    path('churn/pdf/page/<int:pk>/', views.PDFPageDetailView.as_view(), name='pdf_page_detail'),
+
+    # HTMX endpoints for PDF processing
+    path('churn/pdf/<int:pk>/status/', views.pdf_status, name='pdf_status'),
 ]

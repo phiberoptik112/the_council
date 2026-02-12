@@ -53,6 +53,123 @@ class VoteResult:
     mode: CouncilMode
 
 
+class ResponseValidator:
+    """
+    Validates that model responses meet minimum quality thresholds.
+    
+    Checks:
+    1. Refusal detection - catches common LLM refusal/decline phrases
+    2. Minimum length - ensures responses are substantive
+    3. Prompt relevance - checks keyword overlap with the original prompt
+    """
+    
+    # Common refusal patterns (compiled for performance)
+    REFUSAL_PATTERNS = [
+        re.compile(r"i[''']?m sorry.{0,40}(?:can[''']?t|cannot|unable to|won[''']?t)", re.IGNORECASE),
+        re.compile(r"i (?:can[''']?t|cannot|won[''']?t|am unable to) (?:assist|help|provide|respond|answer|fulfill|comply)", re.IGNORECASE),
+        re.compile(r"as an ai.{0,30}(?:can[''']?t|cannot|unable|not able|don[''']?t)", re.IGNORECASE),
+        re.compile(r"i[''']?m not able to (?:assist|help|provide|respond|answer)", re.IGNORECASE),
+        re.compile(r"(?:this|that|your) (?:request|query|question|prompt) (?:is|goes|violates|falls)", re.IGNORECASE),
+        re.compile(r"against my (?:guidelines|programming|policy|rules|principles)", re.IGNORECASE),
+        re.compile(r"i (?:must|have to) (?:decline|refuse|refrain)", re.IGNORECASE),
+        re.compile(r"i[''']?m (?:not )?(?:designed|programmed|allowed) to", re.IGNORECASE),
+        re.compile(r"(?:can[''']?t|cannot|unable to) (?:generate|create|produce|write) (?:that|this|such)", re.IGNORECASE),
+        re.compile(r"if you have (?:any )?other questions.{0,20}feel free", re.IGNORECASE),
+    ]
+    
+    # Minimum character count for a substantive response
+    MIN_RESPONSE_LENGTH = 50
+    
+    # Stop words excluded from relevance checking
+    STOP_WORDS = frozenset({
+        'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+        'her', 'was', 'one', 'our', 'out', 'has', 'have', 'with', 'this', 'that',
+        'from', 'what', 'how', 'why', 'when', 'where', 'which', 'who', 'will',
+        'would', 'could', 'should', 'their', 'there', 'been', 'being', 'does',
+        'about', 'into', 'more', 'other', 'than', 'then', 'them', 'these', 'some',
+        'each', 'any', 'also', 'just', 'like', 'make', 'know', 'take', 'come',
+        'give', 'most', 'find', 'here', 'thing', 'many', 'well', 'only', 'tell',
+        'very', 'even', 'back', 'after', 'use', 'two', 'way', 'look', 'help',
+        'first', 'new', 'because', 'day', 'get', 'got', 'say', 'she', 'him',
+        'his', 'its', 'may', 'still', 'over', 'such', 'now', 'own', 'keep',
+        'let', 'begin', 'seem', 'talk', 'need', 'put', 'try', 'ask', 'too',
+        'explain', 'describe', 'please', 'write', 'what', 'list',
+    })
+    
+    @classmethod
+    def validate_response(cls, response_text: str, original_prompt: str) -> dict:
+        """
+        Validate a single response against minimum quality thresholds.
+        
+        Args:
+            response_text: The model's response content
+            original_prompt: The original user prompt
+            
+        Returns:
+            dict with:
+                is_valid: bool - whether response passes all checks
+                reasons: list[str] - failure reasons (empty if valid)
+                is_refusal: bool - whether a refusal pattern was detected
+                relevance_score: float - 0.0 to 1.0 keyword overlap score
+        """
+        reasons = []
+        
+        # Check 1: Refusal detection
+        is_refusal = cls._detect_refusal(response_text)
+        if is_refusal:
+            reasons.append("Response appears to be a refusal or decline to answer")
+        
+        # Check 2: Minimum length
+        stripped = response_text.strip()
+        if len(stripped) < cls.MIN_RESPONSE_LENGTH:
+            reasons.append(
+                f"Response too short ({len(stripped)} chars, minimum {cls.MIN_RESPONSE_LENGTH})"
+            )
+        
+        # Check 3: Prompt relevance
+        relevance_score = cls._check_relevance(response_text, original_prompt)
+        if relevance_score < 0.1:
+            reasons.append(
+                f"Response has very low relevance to the prompt (score: {relevance_score:.2f})"
+            )
+        
+        return {
+            'is_valid': len(reasons) == 0,
+            'reasons': reasons,
+            'is_refusal': is_refusal,
+            'relevance_score': relevance_score,
+        }
+    
+    @classmethod
+    def _detect_refusal(cls, text: str) -> bool:
+        """Check if the response matches known refusal patterns."""
+        for pattern in cls.REFUSAL_PATTERNS:
+            if pattern.search(text):
+                return True
+        return False
+    
+    @classmethod
+    def _check_relevance(cls, response: str, prompt: str) -> float:
+        """
+        Calculate keyword overlap between prompt and response.
+        
+        Returns a float from 0.0 (no overlap) to 1.0 (all prompt keywords found).
+        """
+        # Extract significant words from the prompt (3+ chars, not stop words)
+        prompt_words = set(
+            word.lower() for word in re.findall(r'\b\w+\b', prompt)
+            if len(word) >= 3 and word.lower() not in cls.STOP_WORDS
+        )
+        
+        if not prompt_words:
+            # Can't assess relevance without meaningful prompt keywords
+            return 1.0
+        
+        response_lower = response.lower()
+        matched = sum(1 for word in prompt_words if word in response_lower)
+        return matched / len(prompt_words)
+
+
 class LLMCouncil:
     """
     Multi-model council that queries multiple LLMs and votes on best response.
@@ -60,6 +177,7 @@ class LLMCouncil:
     Features:
     - Parallel async queries for speed
     - Self-vote exclusion to prevent bias
+    - Response validation to filter refusals and off-topic answers
     - Multiple voting modes
     - Robust error handling with retries
     """
@@ -70,15 +188,21 @@ class LLMCouncil:
         self,
         models: List[str],
         ollama_url: str = "http://localhost:11434",
-        timeout: int = 300,
+        timeout: int = 600,  # 10 minutes - extended timeout for slow models on limited RAM
         retries: int = 2,
-        exclude_self_vote: bool = True
+        exclude_self_vote: bool = True,
+        options: Optional[Dict[str, Any]] = None,
+        keep_alive: Optional[str] = None,
+        stream: bool = False
     ):
         self.models = models
         self.ollama_url = ollama_url
         self.timeout = timeout
         self.retries = retries
         self.exclude_self_vote = exclude_self_vote
+        self.options = options or {}
+        self.keep_alive = keep_alive
+        self.stream = stream
         
     async def check_model_available(self, session: aiohttp.ClientSession, model: str) -> bool:
         """Check if a model is available in Ollama"""
@@ -128,28 +252,64 @@ class LLMCouncil:
             
             try:
                 timeout = aiohttp.ClientTimeout(total=self.timeout)
+                request_payload = {
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": self.stream
+                }
+                if self.options:
+                    request_payload["options"] = {
+                        k: v for k, v in self.options.items()
+                        if v is not None
+                    }
+                if self.keep_alive:
+                    request_payload["keep_alive"] = self.keep_alive
+                logger.debug(f"Sending request to '{model}' at {api_url}: {json.dumps(request_payload, indent=2)[:500]}...")
+                
                 async with session.post(
                     api_url,
-                    json={
-                        "model": model,
-                        "prompt": prompt,
-                        "stream": False
-                    },
+                    json=request_payload,
                     timeout=timeout
                 ) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
                         response_time = time.time() - start_time
-                        response_text = data.get("response", "")
-                        logger.info(f"Model '{model}' responded successfully in {response_time:.1f}s ({len(response_text)} chars)")
-                        result = ModelResponse(
-                            model=model,
-                            response=response_text,
-                            response_time=response_time
-                        )
-                        if callback:
-                            callback(model, "success", result)
-                        return result
+                        if self.stream:
+                            # Stream response: collect NDJSON chunks
+                            response_text = ""
+                            async for line in resp.content:
+                                if line:
+                                    try:
+                                        data = json.loads(line.decode('utf-8'))
+                                        response_text += data.get("response", "")
+                                        if data.get("done"):
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        else:
+                            # Non-streaming: single JSON response
+                            raw_response_text = await resp.text()
+                            logger.debug(f"Raw response from '{model}' (status {resp.status}, length {len(raw_response_text)}): {raw_response_text[:500]}...")
+                            try:
+                                data = json.loads(raw_response_text)
+                                response_text = data.get("response", "")
+                            except json.JSONDecodeError as json_e:
+                                last_error = f"JSON parsing error from model '{model}': {json_e}. Raw response: {raw_response_text[:500]}"
+                                logger.error(last_error)
+                                response_text = ""
+                        
+                        if not response_text.strip():
+                            logger.warning(f"Model '{model}' responded successfully but returned an empty or whitespace-only 'response' field.")
+                            last_error = f"Model '{model}' returned empty response."
+                        else:
+                            logger.info(f"Model '{model}' responded successfully in {response_time:.1f}s ({len(response_text)} chars)")
+                            result = ModelResponse(
+                                model=model,
+                                response=response_text,
+                                response_time=response_time
+                            )
+                            if callback:
+                                callback(model, "success", result)
+                            return result
                     elif resp.status == 404:
                         # Specific handling for 404 - model not found
                         try:
@@ -203,26 +363,42 @@ class LLMCouncil:
     async def get_all_responses_async(
         self,
         prompt: str,
-        callback: Optional[callable] = None
+        callback: Optional[callable] = None,
+        sequential: bool = False
     ) -> List[ModelResponse]:
-        """Get responses from all council members in parallel"""
-        logger.info(f"Getting responses from {len(self.models)} models in parallel")
+        """Get responses from all council members (parallel or sequential)"""
+        if sequential:
+            logger.info(f"Getting responses from {len(self.models)} models sequentially")
+        else:
+            logger.info(f"Getting responses from {len(self.models)} models in parallel")
         logger.debug(f"Models: {self.models}")
         
         async with aiohttp.ClientSession() as session:
-            tasks = [
-                self.query_model_async(session, model, prompt, callback)
-                for model in self.models
-            ]
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            if sequential:
+                responses = []
+                for model in self.models:
+                    r = await self.query_model_async(session, model, prompt, callback)
+                    responses.append(r)
+            else:
+                tasks = [
+                    self.query_model_async(session, model, prompt, callback)
+                    for model in self.models
+                ]
+                responses = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Filter out exceptions and failed responses
+            # Filter out exceptions, failed responses, and empty responses
             valid_responses = []
             failed_count = 0
+            empty_count = 0
             for resp in responses:
                 if isinstance(resp, ModelResponse) and not resp.error:
-                    valid_responses.append(resp)
-                    logger.debug(f"Valid response from '{resp.model}'")
+                    # Check for empty responses (no content or only whitespace)
+                    if resp.response and resp.response.strip():
+                        valid_responses.append(resp)
+                        logger.debug(f"Valid response from '{resp.model}' ({len(resp.response)} chars)")
+                    else:
+                        empty_count += 1
+                        logger.warning(f"Model '{resp.model}' returned empty response (length: {len(resp.response) if resp.response else 0})")
                 elif isinstance(resp, ModelResponse) and resp.error:
                     failed_count += 1
                     logger.warning(f"Model '{resp.model}' failed: {resp.error}")
@@ -230,12 +406,70 @@ class LLMCouncil:
                     failed_count += 1
                     logger.exception(f"Exception during query: {resp}")
             
-            logger.info(f"Got {len(valid_responses)} valid responses, {failed_count} failed")
+            logger.info(f"Got {len(valid_responses)} valid responses, {failed_count} failed, {empty_count} empty")
             
             if not valid_responses:
-                logger.error("No valid responses received from any model!")
+                logger.error(f"No valid responses received from any model! ({failed_count} failed, {empty_count} empty)")
                     
             return valid_responses
+    
+    def validate_responses(
+        self,
+        responses: List[ModelResponse],
+        original_prompt: str
+    ) -> Tuple[List[ModelResponse], List[ModelResponse], Dict[str, dict]]:
+        """
+        Validate all responses against minimum quality thresholds.
+        
+        Separates responses into valid and flagged pools. If fewer than 2
+        responses pass validation, all responses are returned as valid
+        (best-of-a-bad-lot fallback).
+        
+        Args:
+            responses: List of ModelResponse objects to validate
+            original_prompt: The original user prompt for relevance checking
+            
+        Returns:
+            Tuple of (valid_responses, flagged_responses, validation_details)
+            - valid_responses: responses that passed validation (or all, if fallback)
+            - flagged_responses: responses that failed validation
+            - validation_details: dict mapping model name to validation result
+        """
+        valid = []
+        flagged = []
+        details = {}
+        
+        for resp in responses:
+            result = ResponseValidator.validate_response(resp.response, original_prompt)
+            details[resp.model] = result
+            
+            if result['is_valid']:
+                valid.append(resp)
+                logger.debug(
+                    f"Response from '{resp.model}' passed validation "
+                    f"(relevance: {result['relevance_score']:.2f})"
+                )
+            else:
+                flagged.append(resp)
+                logger.warning(
+                    f"Response from '{resp.model}' FAILED validation: "
+                    f"{'; '.join(result['reasons'])}"
+                )
+        
+        logger.info(
+            f"Validation complete: {len(valid)} valid, {len(flagged)} flagged "
+            f"out of {len(responses)} total"
+        )
+        
+        # Fallback: if fewer than 2 valid responses, use all responses
+        if len(valid) < 2 and responses:
+            logger.warning(
+                f"Only {len(valid)} valid response(s) — falling back to all "
+                f"{len(responses)} responses for voting"
+            )
+            return responses, flagged, details
+        
+        return valid, flagged, details
     
     def create_voting_prompt(
         self,
@@ -276,6 +510,8 @@ Evaluate each response for:
 2. Completeness
 3. Clarity and organization
 4. Relevance to the question
+
+CRITICAL: If any response is a refusal (e.g. "I'm sorry, I can't assist"), off-topic, or does not meaningfully address the question, it MUST be ranked last regardless of other qualities.
 
 Rank ALL {num_responses} responses from best to worst.
 
@@ -595,7 +831,7 @@ if __name__ == "__main__":
     # Initialize council with your models
     council = LLMCouncil(
         models=["phi3:mini", "tinyllama", "qwen2.5:0.5b"],
-        timeout=60,
+        timeout=600,  # 10 minutes - extended timeout for slow models on limited RAM
         retries=2,
         exclude_self_vote=True  # Prevent models from voting on their own responses
     )

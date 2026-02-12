@@ -66,22 +66,27 @@
         </div>
     </div>
     
-    <!-- Status (with polling) -->
-    {% include 'council_app/churn/partials/iteration_status.html' %}
-    
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <!-- Main Content -->
-        <div class="lg:col-span-2 space-y-6">
+        <div class="xl:col-span-2 space-y-6">
             <!-- Content Section -->
             <div class="bg-white rounded-lg shadow-sm p-6">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-lg font-semibold text-gray-900">Content</h2>
-                    {% if parent %}
-                    <a href="{% url 'council_app:churn_compare' pk1=parent.id pk2=iteration.id %}" 
-                       class="text-sm text-purple-600 hover:text-purple-700">
-                        Compare with parent
-                    </a>
-                    {% endif %}
+                    <div class="flex items-center space-x-3">
+                        {% if parent %}
+                        <a href="{% url 'council_app:churn_compare' pk1=parent.id pk2=iteration.id %}" 
+                           class="text-sm text-purple-600 hover:text-purple-700">
+                            Compare with parent
+                        </a>
+                        {% endif %}
+                        {% if root_iteration and not iteration.is_root and root_iteration.id != iteration.id %}
+                        <a href="{% url 'council_app:churn_compare' pk1=root_iteration.id pk2=iteration.id %}" 
+                           class="text-sm text-purple-600 hover:text-purple-700">
+                            Compare with original
+                        </a>
+                        {% endif %}
+                    </div>
                 </div>
                 
                 <div class="bg-gray-50 rounded-lg p-4 font-mono text-sm whitespace-pre-wrap max-h-96 overflow-y-auto">{{ iteration.content }}</div>
@@ -121,29 +126,200 @@
                     <div class="bg-green-50 rounded-lg p-4 border border-green-200 font-mono text-sm whitespace-pre-wrap max-h-96 overflow-y-auto">{{ feedback.suggested_content }}</div>
                 </div>
                 {% endif %}
-                
-                <!-- Raw Responses Toggle -->
-                {% if feedback.raw_responses %}
-                <details class="mt-6">
-                    <summary class="cursor-pointer text-sm text-purple-600 hover:text-purple-700">
-                        View individual responses ({{ feedback.response_count }})
+            </div>
+            {% endif %}
+            
+            <!-- Model Conversations Section -->
+            {% if feedback and feedback.raw_responses %}
+            <div id="model-responses" class="bg-white rounded-lg shadow-sm p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4">Model Conversations</h2>
+                <p class="text-sm text-gray-500 mb-4">Individual responses from each model in the council ({{ feedback.response_count }})</p>
+                <details open class="mt-4">
+                    <summary class="cursor-pointer text-sm text-purple-600 hover:text-purple-700 font-medium mb-2">
+                        Expand all responses
                     </summary>
                     <div class="mt-4 space-y-4">
                         {% for response in feedback.raw_responses %}
                         <div class="bg-gray-50 rounded-lg p-4">
-                            <div class="font-medium text-gray-900 mb-2">{{ response.model }}</div>
-                            <div class="text-sm text-gray-600 whitespace-pre-wrap">{{ response.response|truncatewords:200 }}</div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-medium text-gray-900">{{ response.model }}</span>
+                                {% if response.response_time %}
+                                <span class="text-xs text-gray-500">{{ response.response_time|floatformat:2 }}s</span>
+                                {% endif %}
+                            </div>
+                            <div class="text-sm text-gray-600 whitespace-pre-wrap">{{ response.response }}</div>
                         </div>
                         {% endfor %}
                     </div>
                 </details>
+            </div>
+            {% endif %}
+        </div>
+        
+        <!-- Right Panel: Status, Live Outputs, Controls -->
+        <div class="xl:col-span-1 space-y-4">
+            <!-- Status (with polling) and Live Model Outputs -->
+            {% include 'council_app/churn/partials/iteration_status.html' %}
+            
+            <!-- Debug Information Section (when processing or error) -->
+            {% if debug_info %}
+            <div class="bg-white rounded-lg shadow-sm p-6 border-2 border-yellow-200">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    Debug Information
+                </h2>
+                
+                <!-- Validation Summary -->
+                {% if debug_info.validation_summary %}
+                <div class="mb-4 p-3 bg-gray-50 rounded-lg">
+                    <h3 class="text-sm font-semibold text-gray-900 mb-2">Validation Summary</h3>
+                    <dl class="grid grid-cols-3 gap-4 text-sm">
+                        <div>
+                            <dt class="text-gray-500">Total Responses</dt>
+                            <dd class="font-medium text-gray-900">{{ debug_info.validation_summary.total_responses }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-gray-500">Valid</dt>
+                            <dd class="font-medium text-green-600">{{ debug_info.validation_summary.valid_count }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-gray-500">Flagged</dt>
+                            <dd class="font-medium text-red-600">{{ debug_info.validation_summary.flagged_count }}</dd>
+                        </div>
+                    </dl>
+                </div>
+                {% endif %}
+                
+                <!-- Models Queried -->
+                {% if debug_info.models_queried %}
+                <div class="mb-4">
+                    <h3 class="text-sm font-semibold text-gray-900 mb-2">Models Queried</h3>
+                    <div class="flex flex-wrap gap-2">
+                        {% for model in debug_info.models_queried %}
+                        <span class="px-2 py-1 bg-purple-100 text-purple-700 rounded text-sm">{{ model }}</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+                
+                <!-- Model Responses -->
+                {% if debug_info.responses %}
+                <div class="mb-4">
+                    <h3 class="text-sm font-semibold text-gray-900 mb-3">Model Responses</h3>
+                    <div class="space-y-3">
+                        {% for response in debug_info.responses %}
+                        <details class="bg-gray-50 rounded-lg p-3">
+                            <summary class="cursor-pointer font-medium text-gray-900 flex items-center justify-between">
+                                <span>{{ response.model }}</span>
+                                <div class="flex items-center space-x-2">
+                                    {% if response.validation and response.validation.is_valid %}
+                                    <span class="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">Valid</span>
+                                    {% elif response.validation %}
+                                    <span class="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs">Invalid</span>
+                                    {% else %}
+                                    <span class="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">—</span>
+                                    {% endif %}
+                                    {% if response.error %}
+                                    <span class="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs">Error</span>
+                                    {% endif %}
+                                    <span class="text-xs text-gray-500">{{ response.response_time|floatformat:2 }}s</span>
+                                </div>
+                            </summary>
+                            
+                            <div class="mt-3 space-y-2">
+                                <!-- Validation Details -->
+                                {% if response.validation %}
+                                <div class="text-sm">
+                                    <div class="font-medium text-gray-700 mb-1">Validation:</div>
+                                    <ul class="list-disc list-inside text-gray-600 space-y-1">
+                                        {% if response.validation.relevance_score != None %}
+                                        <li>Relevance Score: {{ response.validation.relevance_score|floatformat:2 }}</li>
+                                        {% endif %}
+                                        {% if response.validation.reasons %}
+                                        <li>Issues:
+                                            <ul class="list-disc list-inside ml-4 mt-1">
+                                                {% for reason in response.validation.reasons %}
+                                                <li class="text-red-600">{{ reason }}</li>
+                                                {% endfor %}
+                                            </ul>
+                                        </li>
+                                        {% endif %}
+                                    </ul>
+                                </div>
+                                {% endif %}
+                                
+                                <!-- Error Details -->
+                                {% if response.error %}
+                                <div class="text-sm">
+                                    <div class="font-medium text-red-700 mb-1">Error:</div>
+                                    <div class="text-red-600 bg-red-50 p-2 rounded">{{ response.error }}</div>
+                                </div>
+                                {% endif %}
+                                
+                                <!-- Response Preview -->
+                                {% if response.response %}
+                                <div class="text-sm">
+                                    <div class="font-medium text-gray-700 mb-1">Response Preview:</div>
+                                    <div class="bg-white p-3 rounded border border-gray-200 font-mono text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">{{ response.response }}</div>
+                                </div>
+                                {% endif %}
+                            </div>
+                        </details>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+                
+                <!-- Error Details -->
+                {% if debug_info.error_details %}
+                <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                    <h3 class="text-sm font-semibold text-red-900 mb-2">Error Details</h3>
+                    <div class="text-sm text-red-700 whitespace-pre-wrap">{{ debug_info.error_details }}</div>
+                </div>
                 {% endif %}
             </div>
             {% endif %}
         </div>
         
-        <!-- Sidebar -->
-        <div class="space-y-4">
+        <!-- Right Panel: Status, Live Outputs, Controls -->
+        <div class="xl:col-span-1 space-y-4">
+            <!-- Status (with polling) and Live Model Outputs -->
+            {% include 'council_app/churn/partials/iteration_status.html' %}
+            
+            <!-- Retry Action (for error status) -->
+            {% if iteration.status == 'error' %}
+            <div class="bg-white rounded-lg shadow-sm p-6 border-2 border-red-200">
+                <h3 class="text-lg font-semibold text-red-900 mb-2">Retry Iteration</h3>
+                <p class="text-sm text-red-700 mb-4">This iteration failed. You can retry with the same settings or change the models.</p>
+                
+                <form method="post" action="{% url 'council_app:retry_iteration' pk=iteration.id %}">
+                    {% csrf_token %}
+                    
+                    <!-- Model Selection (optional override) -->
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Models (optional - leave unchecked to use current)</label>
+                        <div class="space-y-2 max-h-40 overflow-y-auto border border-gray-200 rounded-lg p-3">
+                            {% for model in iteration.project.default_models.all %}
+                            <label class="flex items-center text-sm">
+                                <input type="checkbox" name="models" value="{{ model.id }}"
+                                       {% if model in iteration.models_used.all %}checked{% endif %}
+                                       class="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded">
+                                <span class="ml-2">{{ model.display_name|default:model.name }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    
+                    <button type="submit" 
+                            class="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium">
+                        Retry Iteration
+                    </button>
+                </form>
+            </div>
+            {% endif %}
+            
             <!-- Actions -->
             {% if iteration.status == 'complete' %}
             <div class="bg-white rounded-lg shadow-sm p-6">
@@ -162,6 +338,44 @@
                         Continue Iteration
                     </button>
                 </form>
+                
+                <!-- Resume Batch from Here -->
+                <div id="resume-batch" class="pt-4 border-t border-gray-200">
+                    <h4 class="font-medium text-gray-900 mb-2">Resume Batch from Here</h4>
+                    <p class="text-sm text-gray-500 mb-2">Run multiple iterations starting from this one.</p>
+                    <form method="post" action="{% url 'council_app:batch_churn' pk=iteration.id %}" class="space-y-3">
+                        {% csrf_token %}
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">{{ batch_form.num_iterations.label }}</label>
+                            {{ batch_form.num_iterations }}
+                        </div>
+                        <label class="flex items-center text-sm">
+                            {{ batch_form.auto_apply }}
+                            <span class="ml-2">{{ batch_form.auto_apply.label }}</span>
+                        </label>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">{{ batch_form.churn_type.label }}</label>
+                            {{ batch_form.churn_type }}
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Models</label>
+                            <div class="max-h-24 overflow-y-auto border border-gray-200 rounded p-2">
+                                {% for model in iteration.project.default_models.all %}
+                                <label class="flex items-center text-sm">
+                                    <input type="checkbox" name="models" value="{{ model.id }}"
+                                           {% if model in iteration.models_used.all %}checked{% endif %}
+                                           class="h-3 w-3 text-purple-600 border-gray-300 rounded mr-2">
+                                    {{ model.display_name|default:model.name }}
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <button type="submit" 
+                                class="w-full px-4 py-2 border border-purple-600 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm">
+                            Start Batch
+                        </button>
+                    </form>
+                </div>
                 
                 <!-- Branch Form -->
                 <div id="branch" class="pt-4 border-t border-gray-200">

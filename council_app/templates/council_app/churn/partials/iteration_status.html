@@ -19,12 +19,111 @@ HTMX partial for iteration status polling
     </div>
     
     {% elif iteration.status == 'processing' %}
-    <div class="flex items-center space-x-3 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
-        <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-600"></div>
-        <div>
-            <p class="font-medium text-yellow-800">Processing...</p>
-            <p class="text-sm text-yellow-600">The council is reviewing your writing</p>
+    <div class="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+        <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center space-x-3">
+                <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-600"></div>
+                <div>
+                    <p class="font-medium text-yellow-800">Processing...</p>
+                    <p class="text-sm text-yellow-600">The council is reviewing your writing</p>
+                </div>
+            </div>
+            <form method="post" action="{% url 'council_app:stop_churn' pk=iteration.id %}" class="flex-shrink-0">
+                {% csrf_token %}
+                <button type="submit" 
+                        class="px-3 py-1.5 bg-red-600 text-white text-sm rounded hover:bg-red-700 transition-colors whitespace-nowrap">
+                    Stop
+                </button>
+            </form>
         </div>
+        
+        <!-- Processing Stages -->
+        {% if debug_info %}
+        <div class="mt-3 pt-3 border-t border-yellow-200">
+            <p class="text-xs font-medium text-yellow-700 mb-2">Processing Stages:</p>
+            <div class="space-y-1 text-xs text-yellow-600">
+                {% if debug_info.responses %}
+                <div class="flex items-center">
+                    <svg class="w-4 h-4 mr-1 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                    </svg>
+                    <span>Gathering responses ({{ debug_info.responses|length }} received)</span>
+                </div>
+                {% if debug_info.validation_summary %}
+                {% if debug_info.validation_summary.valid_count or debug_info.validation_summary.flagged_count %}
+                <div class="flex items-center">
+                    <svg class="w-4 h-4 mr-1 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                    </svg>
+                    <span>Validating responses ({{ debug_info.validation_summary.valid_count|default:0 }} valid, {{ debug_info.validation_summary.flagged_count|default:0 }} flagged)</span>
+                </div>
+                {% endif %}
+                {% endif %}
+                {% else %}
+                <div class="flex items-center">
+                    <div class="animate-spin rounded-full h-3 w-3 border-b border-yellow-600 mr-1"></div>
+                    <span>Gathering responses from models...</span>
+                </div>
+                {% if debug_info.models_queried %}
+                <div class="flex flex-wrap gap-1 mt-1">
+                    {% for model in debug_info.models_queried %}
+                    <span class="px-1.5 py-0.5 bg-yellow-100 text-yellow-800 rounded text-xs">{{ model }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- Model Status -->
+        {% if debug_info and debug_info.responses %}
+        <div class="mt-3 pt-3 border-t border-yellow-200">
+            <p class="text-xs font-medium text-yellow-700 mb-2">Model Status:</p>
+            <div class="flex flex-wrap gap-2">
+                {% for response in debug_info.responses %}
+                <div class="flex items-center space-x-1 px-2 py-1 bg-white rounded text-xs">
+                    <span class="font-medium">{{ response.model }}</span>
+                    {% if response.error %}
+                    <span class="text-red-600">✗</span>
+                    {% elif response.validation and response.validation.is_valid %}
+                    <span class="text-green-600">✓</span>
+                    {% elif response.validation %}
+                    <span class="text-yellow-600">⚠</span>
+                    {% else %}
+                    <span class="text-yellow-500" title="Response received">⋯</span>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- Live Model Outputs -->
+        {% if debug_info and debug_info.responses %}
+        <div class="mt-3 pt-3 border-t border-yellow-200">
+            <p class="text-xs font-medium text-yellow-700 mb-2">Live Model Outputs ({{ debug_info.responses|length }})</p>
+            <div class="space-y-2 max-h-96 overflow-y-auto">
+                {% for response in debug_info.responses %}
+                <div class="bg-white rounded p-2 text-xs border border-yellow-100">
+                    <div class="flex items-center justify-between mb-1">
+                        <span class="font-medium text-gray-900">{{ response.model }}</span>
+                        {% if response.response_time %}
+                        <span class="text-gray-500">{{ response.response_time|floatformat:2 }}s</span>
+                        {% endif %}
+                    </div>
+                    {% if response.error %}
+                    <div class="text-red-600">{{ response.error }}</div>
+                    {% elif response.response %}
+                    <div class="text-gray-600 font-mono whitespace-pre-wrap">{{ response.response }}</div>
+                    {% else %}
+                    <div class="text-gray-400 italic">Waiting...</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
     </div>
     
     {% elif iteration.status == 'complete' %}
@@ -40,14 +139,24 @@ HTMX partial for iteration status polling
     
     {% elif iteration.status == 'error' %}
     <div class="p-4 bg-red-50 rounded-lg border border-red-200">
-        <div class="flex items-center space-x-3">
-            <svg class="h-6 w-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            <div>
-                <p class="font-medium text-red-800">Error</p>
-                <p class="text-sm text-red-600">{{ iteration.error_message }}</p>
+        <div class="flex items-start justify-between">
+            <div class="flex items-start space-x-3">
+                <svg class="h-6 w-6 text-red-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                <div class="flex-1">
+                    <p class="font-medium text-red-800">Error</p>
+                    <p class="text-sm text-red-600">{{ iteration.error_message }}</p>
+                    <p class="text-xs text-red-500 mt-1">Please retry the iteration.</p>
+                </div>
             </div>
+            <form method="post" action="{% url 'council_app:retry_iteration' pk=iteration.id %}" class="ml-4">
+                {% csrf_token %}
+                <button type="submit" 
+                        class="px-3 py-1.5 bg-red-600 text-white text-sm rounded hover:bg-red-700 transition-colors whitespace-nowrap">
+                    Retry
+                </button>
+            </form>
         </div>
     </div>
     

@@ -1,0 +1,26 @@
+[Unit]
+Description=The Council - Django Web Server (Gunicorn)
+After=network.target
+Wants=council-worker.service
+
+[Service]
+Type=notify
+User=phiberpi5
+Group=phiberpi5
+WorkingDirectory=/home/phiberpi5/Documents/the_council
+Environment="PATH=/home/phiberpi5/Documents/the_council/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DJANGO_SETTINGS_MODULE=council_project.settings"
+ExecStart=/home/phiberpi5/Documents/the_council/venv/bin/gunicorn council_project.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 3 \
+    --timeout 600 \
+    --access-logfile - \
+    --error-logfile -
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=council-web
+
+[Install]
+WantedBy=multi-user.target

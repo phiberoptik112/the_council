@@ -122,6 +122,8 @@ class Response(models.Model):
     response_time = models.FloatField(default=0.0)  # in seconds
     is_winner = models.BooleanField(default=False)
     score = models.IntegerField(default=0)
+    is_validated = models.BooleanField(default=True)  # Whether response passed quality validation
+    validation_notes = models.TextField(blank=True, default='')  # Reasons for validation failure
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
@@ -322,6 +324,7 @@ class ChurnIteration(models.Model):
         default=Status.PENDING
     )
     error_message = models.TextField(blank=True)
+    debug_info = models.JSONField(default=dict, blank=True, help_text="Debug information including model responses and validation results")
     models_used = models.ManyToManyField(
         ModelConfig,
         related_name='churn_iterations',
@@ -329,6 +332,10 @@ class ChurnIteration(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    cancel_requested = models.BooleanField(
+        default=False,
+        help_text="When True, the running task will stop at the next stage boundary"
+    )
     
     class Meta:
         ordering = ['created_at']
@@ -413,6 +420,86 @@ class IterationFeedback(models.Model):
     def response_count(self):
         """Number of individual responses that were synthesized"""
         return len(self.raw_responses)
+
+
+class ChurnConfig(models.Model):
+    """User-configurable performance settings for the Churn Machine (singleton)"""
+    # Ollama options
+    num_predict = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Max tokens to generate (blank=unlimited)"
+    )
+    keep_alive = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="e.g. 5m, 0, blank=default"
+    )
+    num_ctx = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Context window (blank=model default)"
+    )
+    # Churn optimizations
+    sequential_models = models.BooleanField(
+        default=True,
+        help_text="Run models one at a time (better for Pi)"
+    )
+    max_content_chars = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Max chars of content in prompts (blank=no limit)"
+    )
+    max_synthesis_response_chars = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Max chars per response in synthesis"
+    )
+    use_streaming = models.BooleanField(
+        default=False,
+        help_text="Stream Ollama response to avoid timeout"
+    )
+    debug_full_responses = models.BooleanField(
+        default=False,
+        help_text="Store full model responses in debug_info (can be large)"
+    )
+    debug_response_max_chars = models.PositiveIntegerField(
+        default=500,
+        help_text="Max chars per response in debug_info when debug_full_responses is False"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Churn Configuration"
+        verbose_name_plural = "Churn Configuration"
+
+    @classmethod
+    def get_instance(cls):
+        """Get or create the singleton config"""
+        obj, _ = cls.objects.get_or_create(pk=1, defaults={})
+        return obj
+
+    @classmethod
+    def get_effective_config(cls):
+        """Merge DB config with COUNCIL_CONFIG. DB values override when set."""
+        from django.conf import settings as django_settings
+        db = cls.get_instance()
+        cfg = dict(getattr(django_settings, 'COUNCIL_CONFIG', {}))
+        if db.num_predict is not None:
+            cfg['NUM_PREDICT'] = db.num_predict
+        if db.keep_alive:
+            cfg['KEEP_ALIVE'] = db.keep_alive
+        if db.num_ctx is not None:
+            cfg['NUM_CTX'] = db.num_ctx
+        cfg['CHURN_SEQUENTIAL_MODELS'] = db.sequential_models
+        if db.max_content_chars is not None:
+            cfg['CHURN_MAX_CONTENT_CHARS'] = db.max_content_chars
+        if db.max_synthesis_response_chars is not None:
+            cfg['CHURN_MAX_SYNTHESIS_RESPONSE_CHARS'] = db.max_synthesis_response_chars
+        cfg['CHURN_USE_STREAMING'] = db.use_streaming
+        cfg['CHURN_DEBUG_FULL_RESPONSES'] = db.debug_full_responses
+        cfg['CHURN_DEBUG_RESPONSE_MAX_CHARS'] = db.debug_response_max_chars
+        return cfg
 
 
 # =============================================================================
@@ -584,6 +671,15 @@ class ReportSection(models.Model):
         blank=True,
         help_text="Individual model responses"
     )
+    debug_info = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Live debug info during processing (model responses, etc.)"
+    )
+    cancel_requested = models.BooleanField(
+        default=False,
+        help_text="When True, the running task will stop at the next stage boundary"
+    )
     
     error_message = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -623,3 +719,130 @@ class ReportSection(models.Model):
         self.status = self.Status.PENDING
         self.error_message = message
         self.save()
+
+
+# =============================================================================
+# PDF TO MARKDOWN PROCESSING MODELS
+# =============================================================================
+
+class PDFDocument(models.Model):
+    """
+    A PDF document uploaded for vision-based markdown extraction.
+    Processed page-by-page using a single Ollama vision model.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETE = 'complete', 'Complete'
+        ERROR = 'error', 'Error'
+
+    title = models.CharField(max_length=200)
+    file = models.FileField(upload_to='pdfs/')
+    total_pages = models.PositiveIntegerField(default=0)
+    processed_pages = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING
+    )
+    model = models.ForeignKey(
+        ModelConfig,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pdf_documents',
+        help_text="Vision model used for image-to-markdown conversion"
+    )
+    error_message = models.TextField(blank=True)
+    chromadb_collection = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="ChromaDB collection name for vector lookups"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'PDF Document'
+        verbose_name_plural = 'PDF Documents'
+
+    def __str__(self):
+        return f"{self.title} ({self.processed_pages}/{self.total_pages} pages)"
+
+    @property
+    def progress_percent(self):
+        if self.total_pages == 0:
+            return 0
+        return round((self.processed_pages / self.total_pages) * 100)
+
+    def mark_processing(self):
+        self.status = self.Status.PROCESSING
+        self.save(update_fields=['status'])
+
+    def mark_complete(self):
+        self.status = self.Status.COMPLETE
+        self.save(update_fields=['status'])
+
+    def mark_error(self, message: str):
+        self.status = self.Status.ERROR
+        self.error_message = message
+        self.save(update_fields=['status', 'error_message'])
+
+
+class PDFPage(models.Model):
+    """
+    A single page extracted from a PDF document.
+    Stores the vision model's markdown output for that page.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETE = 'complete', 'Complete'
+        ERROR = 'error', 'Error'
+
+    document = models.ForeignKey(
+        PDFDocument,
+        on_delete=models.CASCADE,
+        related_name='pages'
+    )
+    page_number = models.PositiveIntegerField()
+    extracted_markdown = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING
+    )
+    processing_time = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Seconds taken to process this page"
+    )
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['page_number']
+        unique_together = [['document', 'page_number']]
+        verbose_name = 'PDF Page'
+        verbose_name_plural = 'PDF Pages'
+
+    def __str__(self):
+        return f"{self.document.title} - Page {self.page_number}"
+
+    def mark_processing(self):
+        self.status = self.Status.PROCESSING
+        self.save(update_fields=['status'])
+
+    def mark_complete(self, markdown: str, processing_time: float):
+        self.extracted_markdown = markdown
+        self.processing_time = processing_time
+        self.status = self.Status.COMPLETE
+        self.save(update_fields=['extracted_markdown', 'processing_time', 'status'])
+
+    def mark_error(self, message: str):
+        self.status = self.Status.ERROR
+        self.error_message = message
+        self.save(update_fields=['status', 'error_message'])

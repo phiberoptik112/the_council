@@ -1,0 +1,96 @@
+{% extends 'council_app/base.html' %}
+
+{% block title %}Page {{ page.page_number|add:1 }} - {{ document.title }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Header -->
+    <div>
+        <a href="{% url 'council_app:pdf_detail' pk=document.id %}" class="text-indigo-600 hover:text-indigo-800 text-sm flex items-center mb-2">
+            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+            </svg>
+            Back to {{ document.title }}
+        </a>
+        <div class="flex items-center justify-between">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-900">Page {{ page.page_number|add:1 }}</h1>
+                <p class="text-gray-600 mt-1">{{ document.title }}</p>
+            </div>
+            <div class="flex items-center space-x-3 text-sm text-gray-500">
+                {% if page.processing_time %}
+                <span>Processed in {{ page.processing_time|floatformat:1 }}s</span>
+                {% endif %}
+                <span>{{ page.extracted_markdown|length }} characters</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Page Navigation -->
+    <div class="flex items-center justify-between">
+        <div>
+            {% if prev_page %}
+            <a href="{% url 'council_app:pdf_page_detail' pk=prev_page.id %}" 
+               class="inline-flex items-center px-3 py-2 text-sm text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                </svg>
+                Page {{ prev_page.page_number|add:1 }}
+            </a>
+            {% endif %}
+        </div>
+        <div>
+            {% if next_page %}
+            <a href="{% url 'council_app:pdf_page_detail' pk=next_page.id %}" 
+               class="inline-flex items-center px-3 py-2 text-sm text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                Page {{ next_page.page_number|add:1 }}
+                <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                </svg>
+            </a>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Extracted Markdown -->
+    {% if page.extracted_markdown %}
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200">
+        <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+            <h2 class="text-lg font-semibold text-gray-900">Extracted Markdown</h2>
+            <button onclick="copyMarkdown()" 
+                    class="inline-flex items-center px-3 py-1.5 text-sm text-indigo-600 border border-indigo-300 rounded-lg hover:bg-indigo-50 transition-colors">
+                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path>
+                </svg>
+                Copy
+            </button>
+        </div>
+        <div class="p-6">
+            <pre id="markdown-content" class="whitespace-pre-wrap font-mono text-sm text-gray-800 bg-gray-50 p-4 rounded-lg border border-gray-100 max-h-[70vh] overflow-y-auto">{{ page.extracted_markdown }}</pre>
+        </div>
+    </div>
+    {% elif page.status == 'error' %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-6">
+        <h2 class="text-lg font-semibold text-red-800 mb-2">Processing Error</h2>
+        <p class="text-sm text-red-700">{{ page.error_message }}</p>
+    </div>
+    {% else %}
+    <div class="bg-gray-50 border border-gray-200 rounded-lg p-6 text-center">
+        <p class="text-gray-500">This page has not been processed yet.</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+function copyMarkdown() {
+    const content = document.getElementById('markdown-content').textContent;
+    navigator.clipboard.writeText(content).then(() => {
+        // Brief visual feedback
+        const btn = event.target.closest('button');
+        const origText = btn.innerHTML;
+        btn.innerHTML = '<svg class="w-4 h-4 mr-1 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> Copied!';
+        setTimeout(() => { btn.innerHTML = origText; }, 2000);
+    });
+}
+</script>
+{% endblock %}

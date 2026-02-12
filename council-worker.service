@@ -1,0 +1,20 @@
+[Unit]
+Description=The Council - Django-Q2 Worker Cluster
+After=network.target
+
+[Service]
+Type=simple
+User=phiberpi5
+Group=phiberpi5
+WorkingDirectory=/home/phiberpi5/Documents/the_council
+Environment="PATH=/home/phiberpi5/Documents/the_council/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DJANGO_SETTINGS_MODULE=council_project.settings"
+ExecStart=/home/phiberpi5/Documents/the_council/venv/bin/python manage.py qcluster
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=council-worker
+
+[Install]
+WantedBy=multi-user.target

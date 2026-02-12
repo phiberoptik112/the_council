@@ -28,6 +28,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from council import LLMCouncil, ModelResponse
+from .churn import ChurnCancelled
 
 # Set up logger for debugging
 logger = logging.getLogger('council_app.report_churn')
@@ -145,7 +146,7 @@ class ReportChurnEngine:
         self,
         models: List[str],
         ollama_url: str = "http://localhost:11434",
-        timeout: int = 120,
+        timeout: int = 600,  # 10 minutes - extended timeout for slow models on limited RAM
         retries: int = 2,
         knowledgebase_content: str = ""
     ):
@@ -428,7 +429,8 @@ FINAL SUGGESTED VERSION:
         knowledge_context: str,
         full_outline: str,
         preceding_sections: Optional[List[Dict]] = None,
-        callback: Optional[callable] = None
+        callback: Optional[callable] = None,
+        cancel_check: Optional[callable] = None
     ) -> SectionReviewResult:
         """
         Main async method for processing a single report section.
@@ -446,8 +448,13 @@ FINAL SUGGESTED VERSION:
         logger.debug(f"Knowledge context length: {len(knowledge_context)} chars")
         logger.debug(f"Models to query: {self.models}")
 
+        def _check_cancel():
+            if cancel_check and cancel_check():
+                raise ChurnCancelled("Cancelled by user")
+
         # Stage 1: Create the review prompt
         logger.info("Stage 1: Creating section review prompt")
+        _check_cancel()
         if callback:
             callback(None, "creating_prompt", section_title)
 
@@ -459,6 +466,7 @@ FINAL SUGGESTED VERSION:
             preceding_sections=preceding_sections
         )
         logger.debug(f"Created prompt ({len(prompt)} chars)")
+        _check_cancel()
 
         # Stage 2: Gather responses from all models
         logger.info("Stage 2: Gathering responses from all models")
@@ -466,6 +474,7 @@ FINAL SUGGESTED VERSION:
             callback(None, "gathering", None)
 
         responses = await self.council.get_all_responses_async(prompt, callback)
+        _check_cancel()
 
         logger.info(f"Received {len(responses) if responses else 0} valid responses")
         for r in (responses or []):
@@ -487,6 +496,7 @@ FINAL SUGGESTED VERSION:
 
         # Stage 3: Synthesize responses
         logger.info("Stage 3: Synthesizing responses")
+        _check_cancel()
         if callback:
             callback(None, "synthesizing", None)
 
@@ -505,6 +515,7 @@ FINAL SUGGESTED VERSION:
             raise ValueError(f"Synthesis failed: {synthesis_response.error}")
 
         logger.debug(f"Synthesis response received ({len(synthesis_response.response)} chars)")
+        _check_cancel()
 
         # Stage 4: Parse synthesis and extract results
         logger.info("Stage 4: Parsing synthesis response")
@@ -536,6 +547,7 @@ FINAL SUGGESTED VERSION:
 
         # Stage 5: Generate diff
         logger.info("Stage 5: Generating diff")
+        _check_cancel()
         if callback:
             callback(None, "generating_diff", None)
 

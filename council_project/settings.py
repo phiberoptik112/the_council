@@ -46,6 +46,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -122,6 +123,16 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATICFILES_DIRS = [BASE_DIR / 'static']
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+# Media files (uploaded PDFs, etc.)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -134,8 +145,8 @@ Q_CLUSTER = {
     'name': 'council',
     'workers': 2,
     'recycle': 500,
-    'timeout': 300,  # 5 minutes for council queries
-    'retry': 360,    # Retry must be > timeout
+    'timeout': 1800,  # 30 minutes - allows for slow LLM inference on Raspberry Pi
+    'retry': 2100,    # 35 minutes - must be > timeout
     'compress': True,
     'save_limit': 250,
     'queue_limit': 500,
@@ -147,9 +158,30 @@ Q_CLUSTER = {
 # Council Configuration
 COUNCIL_CONFIG = {
     'OLLAMA_URL': 'http://localhost:11434',
-    'DEFAULT_TIMEOUT': 300,  # 5 minutes - suitable for CPU-only inference on Raspberry Pi
+    'DEFAULT_TIMEOUT': 600,  # 10 minutes - extended timeout for slow models on limited RAM systems
     'DEFAULT_RETRIES': 2,
     'EXCLUDE_SELF_VOTE': True,
+    # Ollama generation options (reduce response times on limited hardware)
+    'NUM_PREDICT': 4096,  # Max tokens to generate (None = unlimited)
+    'KEEP_ALIVE': '5m',  # Keep model in memory between requests
+    'NUM_CTX': None,  # Context window (None = use model default)
+    # Churn-specific optimizations
+    'CHURN_SEQUENTIAL_MODELS': True,  # Run models one at a time (better for Pi)
+    'CHURN_MAX_CONTENT_CHARS': 8000,  # Max chars of user content in prompts (~2000 words)
+    'CHURN_MAX_SYNTHESIS_RESPONSE_CHARS': 3000,  # Max chars per response in synthesis prompt
+    'CHURN_USE_STREAMING': False,  # Stream Ollama response to avoid 5-min timeout
+}
+
+# ChromaDB Configuration (local vector database)
+CHROMADB_PATH = BASE_DIR / 'chromadb_data'
+
+# PDF Processing Configuration
+PDF_PROCESSING = {
+    'DEFAULT_DPI': 150,          # DPI for rendering PDF pages to images (lower = less RAM)
+    'DEFAULT_VISION_MODEL': 'moondream',  # Small vision model for RPi
+    'EMBEDDING_MODEL': 'nomic-embed-text',  # Embedding model for ChromaDB
+    'NUM_PREDICT': 4096,         # Max tokens for vision model output per page
+    'PAGE_TIMEOUT': 600,         # Timeout per page in seconds (10 min)
 }
 
 

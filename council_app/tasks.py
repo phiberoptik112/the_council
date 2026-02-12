@@ -10,7 +10,8 @@ from asgiref.sync import sync_to_async
 
 from .models import (
     Query, Response, Vote, ModelConfig, ChurnIteration, IterationFeedback,
-    CreativeProject, QueryEvent, ReportSection, ReportOutline
+    ChurnConfig, CreativeProject, QueryEvent, ReportSection, ReportOutline,
+    PDFDocument, PDFPage,
 )
 
 # Set up loggers for debugging
@@ -241,7 +242,46 @@ async def run_council_async(council, query, model_configs, mode):
         await sync_to_async(query.mark_error)("No responses received from any model")
         return None
     
-    # Save responses to database
+    # --- Response Validation ---
+    # Validate responses before saving/voting to filter refusals and off-topic answers
+    valid_responses, flagged_responses, validation_details = council.validate_responses(
+        responses, query.prompt
+    )
+    
+    # Log validation results for each flagged response
+    for flagged_resp in flagged_responses:
+        detail = validation_details.get(flagged_resp.model, {})
+        reasons = '; '.join(detail.get('reasons', ['Unknown']))
+        await log_query_event(
+            query.id,
+            QueryEvent.EventType.MODEL_ERROR,
+            model_name=flagged_resp.model,
+            message=f"Response flagged by validation: {reasons}",
+            raw_data={
+                'validation': detail,
+                'response_preview': flagged_resp.response[:200],
+            }
+        )
+    
+    # Log validation summary
+    using_fallback = len(valid_responses) == len(responses) and len(flagged_responses) > 0
+    await log_query_event(
+        query.id,
+        QueryEvent.EventType.QUERY_STARTED,
+        message=(
+            f"Validation complete: {len(valid_responses)} valid, "
+            f"{len(flagged_responses)} flagged out of {len(responses)} total"
+            + (" (fallback: using all responses)" if using_fallback else "")
+        ),
+        raw_data={
+            'valid_count': len(valid_responses),
+            'flagged_count': len(flagged_responses),
+            'total_count': len(responses),
+            'using_fallback': using_fallback,
+        }
+    )
+    
+    # Save ALL responses to database (both valid and flagged) with validation status
     labels = council.LABELS
     db_responses = []
     
@@ -253,12 +293,18 @@ async def run_council_async(council, query, model_configs, mode):
         if not model_config:
             continue
         
+        detail = validation_details.get(resp.model, {})
+        is_valid = detail.get('is_valid', True)
+        reasons = '; '.join(detail.get('reasons', []))
+        
         db_response = await sync_to_async(Response.objects.create)(
             query=query,
             model=model_config,
             content=resp.response,
             label=labels[i],
-            response_time=resp.response_time
+            response_time=resp.response_time,
+            is_validated=is_valid,
+            validation_notes=reasons,
         )
         db_responses.append(db_response)
     
@@ -274,11 +320,11 @@ async def run_council_async(council, query, model_configs, mode):
     await log_query_event(
         query.id,
         QueryEvent.EventType.VOTING_STARTED,
-        message=f"Starting voting phase with {len(responses)} responses"
+        message=f"Starting voting phase with {len(valid_responses)} validated responses"
     )
     
-    # Conduct voting with callback
-    vote_results = await council.conduct_vote_async(query.prompt, responses, callback=event_callback)
+    # Conduct voting on validated responses only (or all if fallback)
+    vote_results = await council.conduct_vote_async(query.prompt, valid_responses, callback=event_callback)
     
     # Save votes to database
     for vote_data in vote_results.get('all_votes', []):
@@ -292,13 +338,29 @@ async def run_council_async(council, query, model_configs, mode):
                 voted_on_models=vote_data.get('voted_on', [])
             )
     
-    # Update response scores
-    scores = vote_results.get('scores', {})
-    winner_label = vote_results.get('winner_label', 'A')
+    # Build mapping from voting labels back to model names.
+    # Voting was done on valid_responses, so voting label 'A' = valid_responses[0], etc.
+    voting_label_to_model = {}
+    for i, resp in enumerate(valid_responses):
+        if i < len(labels):
+            voting_label_to_model[labels[i]] = resp.model
     
+    # Map voting scores to model names for correct DB matching
+    raw_scores = vote_results.get('scores', {})
+    model_scores = {}
+    for voting_label, score in raw_scores.items():
+        model_name = voting_label_to_model.get(voting_label)
+        if model_name:
+            model_scores[model_name] = score
+    
+    # Determine the winning model from voting results
+    winner_model_response = vote_results.get('winner')
+    winner_model_name = winner_model_response.model if winner_model_response else None
+    
+    # Update response scores and determine winner
     for db_response in db_responses:
-        db_response.score = scores.get(db_response.label, 0)
-        db_response.is_winner = (db_response.label == winner_label)
+        db_response.score = model_scores.get(db_response.model.name, 0)
+        db_response.is_winner = (db_response.model.name == winner_model_name)
         await sync_to_async(db_response.save)()
         
         # Update model statistics
@@ -310,10 +372,13 @@ async def run_council_async(council, query, model_configs, mode):
     # Find and set winner
     winner_response = next((r for r in db_responses if r.is_winner), None)
     
-    # Handle synthesis/debate modes
+    # Determine the winning label for logging
+    winner_label = winner_response.label if winner_response else 'N/A'
+    
+    # Handle synthesis/debate modes (use valid_responses for these too)
     if mode == CouncilMode.SYNTHESIS and winner_response:
         synthesis_result = await council.synthesize_response_async(
-            query.prompt, responses
+            query.prompt, valid_responses
         )
         if synthesis_result and not synthesis_result.error:
             winner_response.content = synthesis_result.response
@@ -321,12 +386,12 @@ async def run_council_async(council, query, model_configs, mode):
     
     elif mode == CouncilMode.DEBATE and winner_response:
         winning_model_response = next(
-            (r for r in responses if r.model == winner_response.model.name), 
+            (r for r in valid_responses if r.model == winner_response.model.name), 
             None
         )
         if winning_model_response:
             debate_result = await council.debate_and_refine_async(
-                query.prompt, winning_model_response, responses
+                query.prompt, winning_model_response, valid_responses
             )
             if debate_result and not debate_result.error:
                 winner_response.content = debate_result.response
@@ -341,7 +406,12 @@ async def run_council_async(council, query, model_configs, mode):
         QueryEvent.EventType.QUERY_COMPLETE,
         model_name=winner_response.model.name if winner_response else "",
         message=f"Query complete. Winner: {winner_response.model.name if winner_response else 'N/A'}",
-        raw_data={'scores': scores, 'winner_label': winner_label}
+        raw_data={
+            'scores': {k: v for k, v in model_scores.items()},
+            'winner_label': winner_label,
+            'validated_count': len(valid_responses),
+            'flagged_count': len(flagged_responses),
+        }
     )
     
     return vote_results
@@ -419,11 +489,72 @@ def run_churn_iteration(iteration_id: int, model_ids: list, context: str = ""):
         iteration.mark_processing()
         logger.debug(f"Iteration status set to PROCESSING")
         
-        # Import churn engine
-        from .churn import ChurnEngine, ChurnType
+        # Save initial debug_info so polling UI can show models being queried
+        iteration.debug_info = {
+            "models_queried": model_names,
+            "responses": [],
+            "validation_summary": {
+                "total_responses": 0,
+                "valid_count": 0,
+                "flagged_count": 0,
+            },
+        }
+        iteration.save(update_fields=["debug_info"])
         
-        # Get council config from settings
-        config = getattr(settings, 'COUNCIL_CONFIG', {})
+        # Import churn engine
+        from .churn import ChurnEngine, ChurnType, ChurnCancelled
+        
+        # Get config early for callback and engine
+        config = ChurnConfig.get_effective_config()
+        debug_full = config.get('CHURN_DEBUG_FULL_RESPONSES', False)
+        debug_max_chars = config.get('CHURN_DEBUG_RESPONSE_MAX_CHARS', 500)
+        
+        def save_response_callback(model, stage, data):
+            """Persist each model response as it completes for live display."""
+            if stage == "success" and data:
+                resp_text = data.response if data.response else None
+                if resp_text and not debug_full:
+                    resp_text = resp_text[:debug_max_chars]
+                entry = {
+                    "model": data.model,
+                    "response": resp_text,
+                    "response_length": len(data.response) if data.response else 0,
+                    "response_time": data.response_time,
+                    "error": data.error,
+                    "is_empty": not (data.response and data.response.strip()),
+                    "validation": {},
+                }
+            elif stage in ("error", "timeout"):
+                entry = {
+                    "model": model,
+                    "response": None,
+                    "response_length": 0,
+                    "response_time": 0,
+                    "error": str(data) if data else f"{stage}",
+                    "is_empty": True,
+                    "validation": {},
+                }
+            else:
+                return
+            try:
+                iteration.refresh_from_db()
+                debug_info = dict(iteration.debug_info or {})
+                responses = list(debug_info.get("responses", []))
+                responses.append(entry)
+                debug_info["responses"] = responses
+                debug_info["validation_summary"] = debug_info.get("validation_summary", {})
+                debug_info["validation_summary"]["total_responses"] = len(responses)
+                iteration.debug_info = debug_info
+                iteration.save(update_fields=["debug_info"])
+            except Exception as e:
+                logger.warning(f"Failed to persist live response from {model}: {e}")
+        
+        def cancel_check():
+            """Check if user requested cancellation."""
+            iteration.refresh_from_db()
+            return iteration.cancel_requested
+        
+        # Config already loaded above
         ollama_url = config.get('OLLAMA_URL', 'http://localhost:11434')
         default_timeout = config.get('DEFAULT_TIMEOUT', 300)
         retries = config.get('DEFAULT_RETRIES', 2)
@@ -444,44 +575,91 @@ def run_churn_iteration(iteration_id: int, model_ids: list, context: str = ""):
         churn_type = churn_type_map.get(iteration.churn_type, ChurnType.EDIT)
         logger.info(f"Churn type: {churn_type.value}")
         
-        # Create churn engine instance
+        # Create churn engine instance with performance options
         logger.debug(f"Creating ChurnEngine with {len(model_names)} models")
         engine = ChurnEngine(
             models=model_names,
             ollama_url=ollama_url,
             timeout=timeout,
-            retries=retries
+            retries=retries,
+            num_predict=config.get('NUM_PREDICT'),
+            keep_alive=config.get('KEEP_ALIVE'),
+            num_ctx=config.get('NUM_CTX'),
+            sequential=config.get('CHURN_SEQUENTIAL_MODELS', False),
+            max_content_chars=config.get('CHURN_MAX_CONTENT_CHARS'),
+            max_synthesis_response_chars=config.get('CHURN_MAX_SYNTHESIS_RESPONSE_CHARS'),
+            use_streaming=config.get('CHURN_USE_STREAMING', False),
+            debug_full_responses=debug_full,
+            debug_response_max_chars=debug_max_chars,
         )
         
         # Run the churn processing (async)
         logger.info(f"Starting async churn processing for content ({len(iteration.content)} chars)")
-        result = asyncio.run(
-            engine.process_iteration_async(
-                content=iteration.content,
-                churn_type=churn_type,
-                context=context
+        try:
+            result = asyncio.run(
+                engine.process_iteration_async(
+                    content=iteration.content,
+                    churn_type=churn_type,
+                    context=context,
+                    callback=save_response_callback,
+                    cancel_check=cancel_check,
+                )
             )
-        )
-        logger.info(f"Churn processing completed in {result.processing_time:.1f}s")
-        logger.debug(f"Got {len(result.raw_responses)} raw responses")
+            logger.info(f"Churn processing completed in {result.processing_time:.1f}s")
+            logger.debug(f"Got {len(result.raw_responses)} raw responses")
+            
+            # Store debug info if available (even on success, for troubleshooting)
+            if result.debug_info:
+                iteration.debug_info = result.debug_info
+                iteration.save()
+                logger.debug("Stored debug info in iteration")
+            
+            # Save feedback
+            logger.debug("Saving IterationFeedback to database")
+            IterationFeedback.objects.create(
+                iteration=iteration,
+                synthesized_feedback=result.synthesized_feedback,
+                suggested_content=result.suggested_content,
+                raw_responses=result.raw_responses
+            )
+            
+            # Update iteration with diff
+            iteration.content_diff = result.content_diff
+            iteration.mark_complete()
+            
+            logger.info(f"=== Churn iteration {iteration_id} completed successfully ===")
+            return f"Churn iteration {iteration_id} completed successfully"
+            
+        except ChurnCancelled as e:
+            logger.info(f"Churn iteration {iteration_id} cancelled by user")
+            # Keep existing debug_info (partial responses already saved by callback)
+            iteration.mark_error("Cancelled by user")
+            return f"Churn iteration {iteration_id} cancelled"
         
-        # Save feedback
-        logger.debug("Saving IterationFeedback to database")
-        IterationFeedback.objects.create(
-            iteration=iteration,
-            synthesized_feedback=result.synthesized_feedback,
-            suggested_content=result.suggested_content,
-            raw_responses=result.raw_responses
-        )
-        
-        # Update iteration with diff
-        iteration.content_diff = result.content_diff
-        iteration.mark_complete()
-        
-        logger.info(f"=== Churn iteration {iteration_id} completed successfully ===")
-        return f"Churn iteration {iteration_id} completed successfully"
+        except ValueError as e:
+            # Check if exception has debug_info attached
+            debug_info = getattr(e, 'debug_info', None)
+            if debug_info:
+                iteration.debug_info = debug_info
+                iteration.save()
+                logger.debug("Stored debug info from validation failure")
+            
+            error_message = str(e)
+            logger.exception(f"Churn iteration {iteration_id} failed with validation error: {error_message}")
+            iteration.mark_error(error_message)
+            return f"Churn iteration {iteration_id} failed: {error_message}"
         
     except Exception as e:
+        # For other exceptions, try to build basic debug info
+        debug_info = {
+            "models_queried": model_names if 'model_names' in locals() else [],
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "error_details": f"Unexpected error during churn processing: {e}"
+        }
+        iteration.debug_info = debug_info
+        iteration.save()
+        
         logger.exception(f"Churn iteration {iteration_id} failed with exception: {e}")
         iteration.mark_error(str(e))
         return f"Churn iteration {iteration_id} failed: {e}"
@@ -523,8 +701,8 @@ def run_batch_churn(
         # Import churn engine
         from .churn import ChurnEngine, ChurnType
         
-        # Get council config from settings
-        config = getattr(settings, 'COUNCIL_CONFIG', {})
+        # Get config (ChurnConfig DB overrides COUNCIL_CONFIG)
+        config = ChurnConfig.get_effective_config()
         
         # Map churn type string to enum
         churn_type_map = {
@@ -540,19 +718,26 @@ def run_batch_churn(
         model_timeouts = [m.timeout for m in model_configs if m.timeout]
         timeout = max(model_timeouts) if model_timeouts else default_timeout
         
-        # Create churn engine instance
+        # Create churn engine instance with performance options
         engine = ChurnEngine(
             models=model_names,
             ollama_url=config.get('OLLAMA_URL', 'http://localhost:11434'),
             timeout=timeout,
-            retries=config.get('DEFAULT_RETRIES', 2)
+            retries=config.get('DEFAULT_RETRIES', 2),
+            num_predict=config.get('NUM_PREDICT'),
+            keep_alive=config.get('KEEP_ALIVE'),
+            num_ctx=config.get('NUM_CTX'),
+            sequential=config.get('CHURN_SEQUENTIAL_MODELS', False),
+            max_content_chars=config.get('CHURN_MAX_CONTENT_CHARS'),
+            max_synthesis_response_chars=config.get('CHURN_MAX_SYNTHESIS_RESPONSE_CHARS'),
+            use_streaming=config.get('CHURN_USE_STREAMING', False),
         )
         
         # Run all iterations in a single async context
         result = asyncio.run(
             run_batch_churn_async(
                 engine, project, current_iteration, num_iterations,
-                model_configs, auto_apply, churn_type, churn_enum
+                model_configs, churn_type, churn_enum, auto_apply
             )
         )
         return result
@@ -667,19 +852,72 @@ def run_report_section_churn(section_id: int, model_ids: list):
         section.mark_in_progress()
         logger.debug("Section status set to IN_PROGRESS")
 
+        # Initial debug_info for live display
+        section.debug_info = {
+            "models_queried": model_names,
+            "responses": [],
+            "validation_summary": {"total_responses": 0, "valid_count": 0, "flagged_count": 0},
+        }
+        section.save(update_fields=["debug_info"])
+
         # Import report churn engine
         from .report_churn import ReportChurnEngine
+        from .churn import ChurnCancelled
 
-        # Get council config from settings
-        config = getattr(settings, 'COUNCIL_CONFIG', {})
+        config = ChurnConfig.get_effective_config()
+        debug_full = config.get('CHURN_DEBUG_FULL_RESPONSES', False)
+        debug_max_chars = config.get('CHURN_DEBUG_RESPONSE_MAX_CHARS', 500)
+
+        def save_response_callback(model, stage, data):
+            """Persist each model response for live display."""
+            if stage == "success" and data:
+                resp_text = data.response if data.response else None
+                if resp_text and not debug_full:
+                    resp_text = resp_text[:debug_max_chars]
+                entry = {
+                    "model": data.model,
+                    "response": resp_text,
+                    "response_length": len(data.response) if data.response else 0,
+                    "response_time": data.response_time,
+                    "error": data.error,
+                    "is_empty": not (data.response and data.response.strip()),
+                    "validation": {},
+                }
+            elif stage in ("error", "timeout"):
+                entry = {
+                    "model": model,
+                    "response": None,
+                    "response_length": 0,
+                    "response_time": 0,
+                    "error": str(data) if data else str(stage),
+                    "is_empty": True,
+                    "validation": {},
+                }
+            else:
+                return
+            try:
+                section.refresh_from_db()
+                debug_info = dict(section.debug_info or {})
+                responses = list(debug_info.get("responses", []))
+                responses.append(entry)
+                debug_info["responses"] = responses
+                debug_info["validation_summary"] = debug_info.get("validation_summary", {})
+                debug_info["validation_summary"]["total_responses"] = len(responses)
+                section.debug_info = debug_info
+                section.save(update_fields=["debug_info"])
+            except Exception as e:
+                logger.warning(f"Failed to persist live response from {model}: {e}")
+
+        def cancel_check():
+            section.refresh_from_db()
+            return section.cancel_requested
+
+        # Council config from ChurnConfig
         ollama_url = config.get('OLLAMA_URL', 'http://localhost:11434')
         default_timeout = config.get('DEFAULT_TIMEOUT', 300)
         retries = config.get('DEFAULT_RETRIES', 2)
-
-        # Use per-model timeouts if available
         model_timeouts = [m.timeout for m in model_configs if m.timeout]
         timeout = max(model_timeouts) if model_timeouts else default_timeout
-
         logger.info(f"Council config - Ollama URL: {ollama_url}, Timeout: {timeout}s, Retries: {retries}")
 
         # Get knowledgebase content
@@ -719,16 +957,23 @@ def run_report_section_churn(section_id: int, model_ids: list):
         content_to_review = section.current_content or section.original_content
         logger.info(f"Starting async section review for '{section.section_title}' ({len(content_to_review)} chars)")
 
-        result = asyncio.run(
-            engine.process_section_async(
-                section_id=section.section_id,
-                section_title=section.section_title,
-                section_content=content_to_review,
-                knowledge_context=kb_content,
-                full_outline=outline.raw_outline,
-                preceding_sections=preceding_sections
+        try:
+            result = asyncio.run(
+                engine.process_section_async(
+                    section_id=section.section_id,
+                    section_title=section.section_title,
+                    section_content=content_to_review,
+                    knowledge_context=kb_content,
+                    full_outline=outline.raw_outline,
+                    preceding_sections=preceding_sections,
+                    callback=save_response_callback,
+                    cancel_check=cancel_check,
+                )
             )
-        )
+        except ChurnCancelled:
+            logger.info(f"Report section {section_id} cancelled by user")
+            section.mark_error("Cancelled by user")
+            return f"Section '{section.section_title}' cancelled"
         logger.info(f"Section review completed in {result.processing_time:.1f}s")
         logger.debug(f"Compliance score: {result.compliance_score}")
 
@@ -821,3 +1066,259 @@ def run_full_report_churn(report_outline_id: int, model_ids: list, auto_advance:
     except Exception as e:
         logger.exception(f"Full report churn failed: {e}")
         return f"Full report churn failed: {e}"
+
+
+# =============================================================================
+# PDF TO MARKDOWN PROCESSING TASKS
+# =============================================================================
+
+def process_pdf_document(document_id: int):
+    """
+    Background task to process a PDF document page-by-page through a vision model.
+
+    This is a SINGLE-MODEL task (not a council process). Each page is:
+    1. Rendered to a PNG image at controlled DPI
+    2. Sent to an Ollama vision model for markdown extraction
+    3. Stored in the database (PDFPage)
+    4. Stored in ChromaDB for vector search
+
+    Pages are processed sequentially to conserve RAM on Raspberry Pi.
+
+    Args:
+        document_id: ID of the PDFDocument to process
+    """
+    logger.info(f"=== Starting PDF processing for document {document_id} ===")
+
+    try:
+        document = PDFDocument.objects.get(id=document_id)
+    except PDFDocument.DoesNotExist:
+        logger.error(f"PDFDocument {document_id} not found")
+        return f"PDFDocument {document_id} not found"
+
+    try:
+        from .pdf_processor import PDFPageProcessor
+
+        # Mark as processing
+        document.mark_processing()
+
+        # Resolve the file path
+        pdf_path = document.file.path
+        logger.info(f"Processing PDF: {pdf_path}")
+
+        # Get page count
+        total_pages = PDFPageProcessor.extract_page_count(pdf_path)
+        document.total_pages = total_pages
+        document.save(update_fields=['total_pages'])
+        logger.info(f"PDF has {total_pages} pages")
+
+        # Create PDFPage records for all pages
+        for page_num in range(total_pages):
+            PDFPage.objects.get_or_create(
+                document=document,
+                page_number=page_num,
+                defaults={'status': PDFPage.Status.PENDING},
+            )
+
+        # Determine vision model name
+        model_name = None
+        if document.model:
+            model_name = document.model.name
+        if not model_name:
+            pdf_config = getattr(settings, 'PDF_PROCESSING', {})
+            model_name = pdf_config.get('DEFAULT_VISION_MODEL', 'moondream')
+
+        # Build collection name for ChromaDB
+        import re
+        slug = re.sub(r'[^a-zA-Z0-9]', '_', document.title.lower())[:30]
+        collection_name = f"pdf_{document.id}_{slug}"
+        document.chromadb_collection = collection_name
+        document.save(update_fields=['chromadb_collection'])
+
+        # Create processor
+        processor = PDFPageProcessor(model_name=model_name)
+
+        # Metadata for ChromaDB storage
+        base_metadata = {
+            'document_id': document.id,
+            'title': document.title,
+            'filename': document.file.name,
+        }
+
+        # Process pages sequentially (RAM-friendly)
+        async def process_all_pages():
+            for page_num in range(total_pages):
+                page_obj = PDFPage.objects.get(
+                    document=document, page_number=page_num
+                )
+
+                # Skip already-completed pages (for retry scenarios)
+                if page_obj.status == PDFPage.Status.COMPLETE:
+                    logger.info(f"Page {page_num} already complete, skipping")
+                    continue
+
+                page_obj.mark_processing()
+
+                try:
+                    import time as _time
+                    start = _time.time()
+
+                    markdown = await processor.process_single_page(
+                        pdf_path=pdf_path,
+                        page_num=page_num,
+                        collection_name=collection_name,
+                        metadata=base_metadata,
+                    )
+
+                    elapsed = _time.time() - start
+                    page_obj.mark_complete(
+                        markdown=markdown,
+                        processing_time=elapsed,
+                    )
+
+                    # Update document progress
+                    document.processed_pages = page_num + 1
+                    document.save(update_fields=['processed_pages'])
+
+                    logger.info(
+                        f"Page {page_num + 1}/{total_pages} complete "
+                        f"({elapsed:.1f}s, {len(markdown)} chars)"
+                    )
+
+                except Exception as page_error:
+                    logger.exception(f"Error processing page {page_num}: {page_error}")
+                    page_obj.mark_error(str(page_error))
+                    # Continue to next page instead of stopping entirely
+                    document.processed_pages = page_num + 1
+                    document.save(update_fields=['processed_pages'])
+
+        # Run the async processing
+        asyncio.run(process_all_pages())
+
+        # Check if all pages completed successfully
+        error_pages = document.pages.filter(status=PDFPage.Status.ERROR).count()
+        complete_pages = document.pages.filter(status=PDFPage.Status.COMPLETE).count()
+
+        if error_pages > 0:
+            document.mark_error(
+                f"{error_pages} of {total_pages} pages had errors. "
+                f"{complete_pages} pages processed successfully."
+            )
+            # Still mark as complete if most pages succeeded
+            if complete_pages > 0:
+                document.status = PDFDocument.Status.COMPLETE
+                document.error_message = (
+                    f"{error_pages} of {total_pages} pages had errors. "
+                    f"{complete_pages} pages processed successfully."
+                )
+                document.save(update_fields=['status', 'error_message'])
+        else:
+            document.mark_complete()
+
+        logger.info(
+            f"=== PDF processing complete: {complete_pages}/{total_pages} pages, "
+            f"{error_pages} errors ==="
+        )
+        return (
+            f"PDF '{document.title}' processed: "
+            f"{complete_pages}/{total_pages} pages complete"
+        )
+
+    except Exception as e:
+        logger.exception(f"PDF processing failed for document {document_id}: {e}")
+        document.mark_error(str(e))
+        return f"PDF processing failed: {e}"
+
+
+# =============================================================================
+# STUCK TASK CLEANUP
+# =============================================================================
+
+def cleanup_stuck_tasks(stale_minutes: int = 45):
+    """
+    Periodic cleanup task that detects and marks stale processing tasks as errors.
+
+    When Django-Q2 kills a task for exceeding its timeout (via SIGKILL), the
+    exception handler in the task function never runs, leaving the database
+    record stuck in a "processing" / "gathering" / "in_progress" state forever.
+    This task finds those orphaned records and marks them as errors so the user
+    can see what happened and retry.
+
+    Args:
+        stale_minutes: Number of minutes after which a processing task is
+                       considered stuck (default 45).
+    """
+    from datetime import timedelta
+
+    cutoff = timezone.now() - timedelta(minutes=stale_minutes)
+    cleaned = 0
+
+    # --- ChurnIteration stuck in 'processing' ---
+    stuck_iterations = ChurnIteration.objects.filter(
+        status=ChurnIteration.Status.PROCESSING,
+        created_at__lt=cutoff,
+    )
+    for iteration in stuck_iterations:
+        logger.warning(
+            f"Cleaning up stuck ChurnIteration {iteration.id} "
+            f"(created {iteration.created_at}, project: {iteration.project.title})"
+        )
+        iteration.mark_error(
+            "Task timed out or was terminated unexpectedly. "
+            "Please retry the iteration."
+        )
+        cleaned += 1
+
+    # --- Query stuck in 'gathering' or 'voting' ---
+    stuck_queries = Query.objects.filter(
+        status__in=[Query.Status.GATHERING, Query.Status.VOTING],
+        created_at__lt=cutoff,
+    )
+    for query in stuck_queries:
+        logger.warning(
+            f"Cleaning up stuck Query {query.id} "
+            f"(status: {query.status}, created {query.created_at})"
+        )
+        query.mark_error(
+            "Task timed out or was terminated unexpectedly. "
+            "Please submit your query again."
+        )
+        cleaned += 1
+
+    # --- ReportSection stuck in 'in_progress' ---
+    stuck_sections = ReportSection.objects.filter(
+        status=ReportSection.Status.IN_PROGRESS,
+        updated_at__lt=cutoff,
+    )
+    for section in stuck_sections:
+        logger.warning(
+            f"Cleaning up stuck ReportSection {section.id} "
+            f"(title: '{section.section_title}', updated {section.updated_at})"
+        )
+        section.mark_error(
+            "Task timed out or was terminated unexpectedly. "
+            "Please retry this section."
+        )
+        cleaned += 1
+
+    # --- PDFDocument stuck in 'processing' ---
+    stuck_pdfs = PDFDocument.objects.filter(
+        status=PDFDocument.Status.PROCESSING,
+        updated_at__lt=cutoff,
+    )
+    for pdf_doc in stuck_pdfs:
+        logger.warning(
+            f"Cleaning up stuck PDFDocument {pdf_doc.id} "
+            f"(title: '{pdf_doc.title}', updated {pdf_doc.updated_at})"
+        )
+        pdf_doc.mark_error(
+            "Task timed out or was terminated unexpectedly. "
+            "Please retry processing."
+        )
+        cleaned += 1
+
+    if cleaned:
+        logger.info(f"Stuck-task cleanup: marked {cleaned} stuck records as errors")
+    else:
+        logger.debug("Stuck-task cleanup: no stuck records found")
+
+    return f"Cleaned up {cleaned} stuck tasks"

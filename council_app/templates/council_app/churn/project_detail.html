@@ -60,8 +60,14 @@
             <div class="bg-white rounded-lg shadow-sm p-6">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-lg font-semibold text-gray-900">Latest: Iteration {{ latest_iteration.iteration_number }}</h2>
-                    <a href="{% url 'council_app:churn_iteration' pk=latest_iteration.id %}" 
-                       class="text-purple-600 hover:text-purple-700 text-sm">View Details</a>
+                    <div class="flex items-center space-x-3">
+                        <a href="{% url 'council_app:churn_iteration' pk=latest_iteration.id %}" 
+                           class="text-purple-600 hover:text-purple-700 text-sm">View Details</a>
+                        {% if latest_iteration_has_feedback %}
+                        <a href="{% url 'council_app:churn_iteration' pk=latest_iteration.id %}#model-responses" 
+                           class="text-purple-600 hover:text-purple-700 text-sm">View model responses</a>
+                        {% endif %}
+                    </div>
                 </div>
                 
                 <div class="flex items-center space-x-4 mb-4">
